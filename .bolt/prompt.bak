@@ -1,0 +1,21 @@
+Même si le fichier est long, modifie directement le fichier existant sauf indication explicite de créer un nouveau fichier.
+Conserve impérativement l’ordre visuel et logique actuel des champs et sections dans le formulaire.
+Ne modifie que les fichiers explicitement mentionnés dans les prompts. 
+Respecte strictement la structure existante du code.
+Ne jamais modifier composant ou élément qui n'est pas explicitement mentionné dans le prompt.  
+N'interviens que sur les fonctions, composants ou éléments indiqués.
+N’ajoute ni ne retire de balises JSX sans instruction explicite.
+Respecte strictement les noms des composants, fichiers, fonctions et balises cités.  
+Utilise les technologies déjà présentes (ex : React, Tailwind, ShadCN) sans réécrire ce qui fonctionne. 
+N'utilise aucun design supplémentaire, image ou icône.
+Utilise exclusivement les composants existants, les hooks React et Tailwind CSS déjà présents.
+Tout ce qui est développé ou modifié doit être **entièrement responsive** (adapté à l’usage mobile).  
+Ajoute des **balises console.log régulières** et explicites dans le code pour faciliter le contrôle et le débogage.  
+Ne propose aucune amélioration, refactorisation ou ajustement automatique, même s’ils semblent utiles.    
+Ne modifie rien d’autre ou fonction non mentionné dans le prompt.  
+N'interviens jamais sur l'ordre ou la structure JSX globale des composants.
+N’ajoute ni ne retire de balises JSX, containers ou divs, sauf si c’est expressément demandé.
+Ne modifie aucun style, aucune classe CSS ou disposition visuelle.
+Ne touche jamais au bloc de sélection de TVA ou à son emplacement.
+Applique uniquement les modifications fonctionnelles demandées. Ne modifie rien d’autre.
+
