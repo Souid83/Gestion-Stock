@@ -206,9 +206,9 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 flex">
+    <div className="h-screen bg-gray-100 flex overflow-hidden">
       {/* Sidebar */}
-      <aside className="w-64 bg-[#2d3741] text-white">
+      <aside className="w-64 bg-[#2d3741] text-white h-screen overflow-y-auto">
         <div className="p-4">
           <div className="flex items-center space-x-3 mb-4">
             <div className="w-8 h-8 bg-purple-500 rounded-full flex items-center justify-center">
@@ -435,7 +435,7 @@ function App() {
       </aside>
 
       {/* Main Content */}
-      <div className="flex-1">
+      <div className="flex-1 flex flex-col h-screen overflow-hidden">
         {/* Header */}
         <header className="bg-[#3498db] text-white shadow">
           <div className="container mx-auto px-4 py-3">
@@ -453,7 +453,9 @@ function App() {
           </div>
         </header>
 
-        {renderContent()}
+        <div className="flex-1 min-h-0 overflow-hidden">
+          {renderContent()}
+        </div>
       </div>
     </div>
   );

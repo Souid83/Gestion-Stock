@@ -100,7 +100,7 @@ export const SerialNumberListModal: React.FC<SerialNumberListModalProps> = ({
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {serialProducts.map((product) => (
-                <tr key={product.id}>
+                <tr key={product.id} className={product.vat_type === 'margin' ? 'text-blue-600 font-bold' : ''}>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                     {product.vat_type === 'normal' ? 'TVA normale' : 'TVA marge'}
                   </td>

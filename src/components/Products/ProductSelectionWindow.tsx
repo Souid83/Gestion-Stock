@@ -34,6 +34,7 @@ interface ProductSelectionWindowProps {
     color: string;
     grade: string;
     capacity: string;
+    sim_type: string;
   };
 }
 
@@ -60,6 +61,8 @@ export const ProductSelectionWindow: React.FC<ProductSelectionWindowProps> = ({
     setLoading(true);
     setError(null);
     try {
+      console.log('Fetching products with criteria:', { category, variant });
+      
       const { data, error: fetchError } = await supabase
         .from('products')
         .select(`
@@ -67,6 +70,8 @@ export const ProductSelectionWindow: React.FC<ProductSelectionWindowProps> = ({
           name,
           sku,
           stock_total,
+          is_parent,
+          variants,
           category:product_categories!inner(
             type,
             brand,
@@ -75,11 +80,28 @@ export const ProductSelectionWindow: React.FC<ProductSelectionWindowProps> = ({
         `)
         .eq('product_categories.type', category.type)
         .eq('product_categories.brand', category.brand)
-        .eq('product_categories.model', category.model);
+        .eq('product_categories.model', category.model)
+        .eq('is_parent', true);
 
       if (fetchError) throw fetchError;
-      console.log('Fetched products:', data);
-      setProducts(data || []);
+      
+      // Filter products by exact variant match
+      const filteredProducts = (data || []).filter(product => {
+        if (!product.variants || !Array.isArray(product.variants)) {
+          return false;
+        }
+        
+        // Check if any variant in the product matches all selected criteria
+        return product.variants.some((productVariant: any) => 
+          productVariant.color === variant.color &&
+          productVariant.grade === variant.grade &&
+          productVariant.capacity === variant.capacity &&
+          productVariant.sim_type === variant.sim_type
+        );
+      });
+      
+      console.log('Filtered products by exact variant match:', filteredProducts);
+      setProducts(filteredProducts);
     } catch (err) {
       console.error('Error fetching products:', err);
       setError('Erreur lors de la récupération des produits');
@@ -114,7 +136,7 @@ export const ProductSelectionWindow: React.FC<ProductSelectionWindowProps> = ({
         className="bg-white rounded-lg shadow-xl w-full max-w-2xl overflow-hidden"
       >
         <div className="p-4 border-b border-gray-200 flex justify-between items-center">
-          <h2 className="text-lg font-semibold text-gray-900">Sélection du produit</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Sélection du produit parent pour ajouter vos numéro de série</h2>
           <button
             onClick={onClose}
             className="text-gray-400 hover:text-gray-500"
@@ -140,7 +162,7 @@ export const ProductSelectionWindow: React.FC<ProductSelectionWindowProps> = ({
                 <p><strong>Catégorie:</strong> {category.type} {category.brand} {category.model}</p>
               </div>
               <div>
-                <p><strong>Variante:</strong> {variant.color} {variant.grade} {variant.capacity}</p>
+                <p><strong>Variante:</strong> {variant.color} {variant.grade} {variant.capacity} {variant.sim_type}</p>
               </div>
             </div>
           </div>

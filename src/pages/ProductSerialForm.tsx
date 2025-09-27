@@ -82,7 +82,8 @@ export const ProductSerialForm: React.FC = () => {
   const [selectedVariant, setSelectedVariant] = useState({
     color: '',
     grade: '',
-    capacity: ''
+    capacity: '',
+    sim_type: ''
   });
   
   const [showProductSelection, setShowProductSelection] = useState(false);
@@ -185,7 +186,8 @@ export const ProductSerialForm: React.FC = () => {
       selectedCategory.model &&
       selectedVariant.color && 
       selectedVariant.grade && 
-      selectedVariant.capacity
+      selectedVariant.capacity &&
+      selectedVariant.sim_type
     ) {
       console.log('Opening product selection window');
       setShowProductSelection(true);
@@ -431,7 +433,7 @@ export const ProductSerialForm: React.FC = () => {
         <div className="max-w-4xl mx-auto space-y-8">
           {/* Category and Variant Selection */}
           <div className="bg-white rounded-lg shadow p-6">
-            <h2 className="text-xl font-semibold mb-6">Sélection du produit</h2>
+            <h2 className="text-xl font-semibold mb-6">Choisissez Catégorie et variante pour sélectionner votre produit parent auquel vous souhaitez ajouter des numéros de série</h2>
 
             <div className="mb-8">
               <h3 className="text-lg font-medium text-gray-900 mb-4">Catégorie</h3>
@@ -500,7 +502,7 @@ export const ProductSerialForm: React.FC = () => {
 
             <div>
               <h3 className="text-lg font-medium text-gray-900 mb-4">Variante</h3>
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-4 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Couleur
@@ -546,6 +548,22 @@ export const ProductSerialForm: React.FC = () => {
                     <option value="">Sélectionner une capacité</option>
                     {Array.from(new Set(variants.map(v => v.capacity))).sort().map(capacity => (
                       <option key={capacity} value={capacity}>{capacity}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Type de SIM
+                  </label>
+                  <select
+                    value={selectedVariant.sim_type}
+                    onChange={(e) => handleVariantChange('sim_type', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md bg-white"
+                    required
+                  >
+                    <option value="">Sélectionner un type de SIM</option>
+                    {Array.from(new Set(variants.map(v => v.sim_type).filter(Boolean))).sort().map(simType => (
+                      <option key={simType} value={simType}>{simType}</option>
                     ))}
                   </select>
                 </div>
@@ -676,7 +694,7 @@ export const ProductSerialForm: React.FC = () => {
                   required
                 >
                   <option value="">Sélectionner un stock</option>
-                  {stocks.map(stock => (
+                  {(stocks as Stock[]).map((stock: Stock) => (
                     <option key={stock.id} value={stock.id}>
                       {stock.name} {stock.group.length > 0 ? `(${stock.group[0].name})` : ''}
                     </option>
@@ -971,7 +989,7 @@ export const ProductSerialForm: React.FC = () => {
     const input = parseFloat(value);
 
     if (formData.vat_type === 'margin' && !isNaN(purchase) && !isNaN(input)) {
-      const result = calculateFromMarginValue(purchase, input);
+      const result = calculateMarginFromValue_Margin(purchase, input);
       setFormData(prev => ({
         ...prev,
         retailPrice: {
@@ -1021,7 +1039,7 @@ export const ProductSerialForm: React.FC = () => {
 
     if (formData.vat_type === 'margin' && !isNaN(purchase) && !isNaN(input)) {
       // Champ Prix HT (ou Prix de vente) pour pro
-      const result = calculateFromSellingPrice(purchase, input);
+      const result = calculateMarginFromSellingPrice_Margin(purchase, input);
       setFormData(prev => ({
         ...prev,
         proPrice: {
@@ -1073,7 +1091,7 @@ export const ProductSerialForm: React.FC = () => {
 
     if (formData.vat_type === 'margin' && !isNaN(purchase) && !isNaN(input)) {
       // Champ Marge % pour pro
-      const result = calculateFromMarginPercent(purchase, input);
+      const result = calculateMarginFromPercent_Margin(purchase, input);
       setFormData(prev => ({
         ...prev,
         proPrice: {
@@ -1126,7 +1144,7 @@ export const ProductSerialForm: React.FC = () => {
 
     if (formData.vat_type === 'margin' && !isNaN(purchase) && !isNaN(input)) {
       // Champ Marge numéraire net (ou TTC) pour pro
-      const result = calculateFromMarginValue(purchase, input);
+      const result = calculateMarginFromValue_Margin(purchase, input);
       setFormData(prev => ({
         ...prev,
         proPrice: {
@@ -1179,7 +1197,7 @@ export const ProductSerialForm: React.FC = () => {
     const input = parseFloat(value);
 
     if (formData.vat_type === 'margin' && !isNaN(purchase) && !isNaN(input)) {
-      const result = calculateFromMarginValue(purchase, input);
+      const result = calculateMarginFromValue_Margin(purchase, input);
       setFormData(prev => ({
         ...prev,
         proPrice: {

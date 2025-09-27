@@ -7,6 +7,7 @@ interface ProductVariant {
   color: string;
   grade: string;
   capacity: string;
+  sim_type: string;
   created_at: string;
   updated_at: string;
 }
@@ -37,7 +38,8 @@ export const useVariantStore = create<VariantStore>((set, get) => ({
         .select('*')
         .order('color', { ascending: true })
         .order('grade', { ascending: true })
-        .order('capacity', { ascending: true });
+        .order('capacity', { ascending: true })
+        .order('sim_type', { ascending: true });
 
       if (error) throw error;
 
@@ -61,6 +63,7 @@ export const useVariantStore = create<VariantStore>((set, get) => ({
         .eq('color', variant.color.toUpperCase())
         .eq('grade', variant.grade.toUpperCase())
         .eq('capacity', variant.capacity.toUpperCase())
+        .eq('sim_type', variant.sim_type.toUpperCase())
         .maybeSingle();
 
       // If variant exists, just return without error
@@ -76,7 +79,8 @@ export const useVariantStore = create<VariantStore>((set, get) => ({
           ...variant,
           color: variant.color.toUpperCase(),
           grade: variant.grade.toUpperCase(),
-          capacity: variant.capacity.toUpperCase()
+          capacity: variant.capacity.toUpperCase(),
+          sim_type: variant.sim_type.toUpperCase()
         }])
         .select()
         .single();

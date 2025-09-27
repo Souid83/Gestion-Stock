@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Package, Bell, DollarSign, Settings, Users, ShoppingBag, Cloud, PenTool as Tool, Box, Layers, Image as ImageIcon, Download, Upload, ArrowDown, Plus } from 'lucide-react';
+import { Package, Bell, DollarSign, Settings, Users, ShoppingBag, Cloud, PenTool as Tool, Box, Layers, Image as ImageIcon, Download, Upload, ArrowRight, Plus } from 'lucide-react';
 import { useProductStore } from '../../store/productStore';
 import { useCategoryStore } from '../../store/categoryStore';
 import { ImageManager } from './ImageManager';
@@ -7,6 +7,12 @@ import { StockAllocationModal } from './StockAllocationModal';
 import { supabase } from '../../lib/supabase';
 import { ImportDialog } from '../ImportProgress/ImportDialog';
 import { useCSVImport } from '../../hooks/useCSVImport';
+import { Toast } from '../Notifications/Toast';
+
+interface Stock {
+  id: string;
+  name: string;
+}
 
 const TVA_RATE = 0.20;
 
@@ -45,7 +51,11 @@ interface ProductFormProps {
     margin_value?: number;
     pro_margin_percent?: number;
     pro_margin_value?: number;
-    shared_stock_id?: string;
+    // Champs supplémentaires utilisés par la logique du formulaire
+    is_parent?: boolean;
+    parent_id?: string | null;
+    serial_number?: string | null;
+    variants?: any[];
   };
   onSubmitSuccess?: () => void;
   showImageManager?: boolean;
@@ -56,8 +66,22 @@ export const ProductForm: React.FC<ProductFormProps> = ({
   onSubmitSuccess,
   showImageManager = false
 }) => {
-  const { addProduct, updateProduct } = useProductStore();
+  // Différenciation parent/enfant
+  const isParentProduct = initialProduct?.is_parent === true;
+  const isChildProduct = initialProduct?.is_parent === false && initialProduct?.parent_id;
+  
+  console.log('ProductForm - Product type analysis:', {
+    isParentProduct,
+    isChildProduct,
+    is_parent: initialProduct?.is_parent,
+    parent_id: initialProduct?.parent_id,
+    serial_number: initialProduct?.serial_number
+  });
+
+  const { addProduct, addSerialChild, updateProduct } = useProductStore();
   const { categories, fetchCategories, addCategory } = useCategoryStore();
+  
+  
   const fileInputRef = useRef<HTMLInputElement>(null);
   const {
     importState,
@@ -109,9 +133,12 @@ export const ProductForm: React.FC<ProductFormProps> = ({
   const [newProductName, setNewProductName] = useState('');
   const [globalStock, setGlobalStock] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [stocks, setStocks] = useState<Stock[]>([]);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   useEffect(() => {
     fetchCategories();
+    fetchStocks();
   }, [fetchCategories]);
 
   useEffect(() => {
@@ -130,6 +157,27 @@ export const ProductForm: React.FC<ProductFormProps> = ({
   useEffect(() => {
     setIsImageManagerOpen(showImageManager);
   }, [showImageManager]);
+
+  const fetchStocks = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('stocks')
+        .select('id, name')
+        .order('name');
+      
+      if (error) throw error;
+      setStocks(((data as any[]) || []).map((s: any) => ({ id: s.id, name: s.name })) as Stock[]);
+    } catch (err) {
+      console.error('Error fetching stocks:', err);
+    }
+  };
+
+  // Détecter si c'est un produit parent qui peut accueillir des numéros de série
+  const isSerialHostingParent = initialProduct && 
+    initialProduct.is_parent && 
+    initialProduct.variants && 
+    Array.isArray(initialProduct.variants) && 
+    initialProduct.variants.length > 0;
 
   // Ne pas recalculer dynamiquement les marges à l'ouverture d'un produit existant : on affiche ce qui est en base
   // Cette logique est volontairement désactivée pour éviter d'écraser la valeur enregistrée par l'utilisateur
@@ -271,6 +319,181 @@ export const ProductForm: React.FC<ProductFormProps> = ({
 
     try {
       const text = await file.text();
+      // Détection d'un import de numéros de série si l'en-tête contient "serial_number"
+      const firstLine = text.split('\n')[0]?.trim().toLowerCase() || '';
+      if (isSerialHostingParent && firstLine.includes('serial_number')) {
+        try {
+          const lines = text.split('\n').map(r => r.trim()).filter(Boolean);
+          const header = lines[0].split(',').map(h => h.trim());
+          const headerLower = header.map(h => h.toLowerCase());
+          // Champs requis minimaux
+          const required = ['serial_number', 'purchase_price_with_fees', 'supplier', 'stock_name'];
+          const missing = required.filter(h => !headerLower.includes(h));
+          if (missing.length) {
+            throw new Error('En-têtes CSV invalides. Champs requis manquants: ' + missing.join(','));
+          }
+          // Indices de colonnes (accepte stock_name en plus de stock_id)
+          const idx = (name: string) => headerLower.indexOf(name);
+          const col = {
+            sku_parent: idx('sku_parent'),
+            purchase_price_with_fees: idx('purchase_price_with_fees'),
+            retail_price: idx('retail_price'),
+            pro_price: idx('pro_price'),
+            raw_purchase_price: idx('raw_purchase_price'),
+            stock_id: idx('stock_id'),
+            stock_name: idx('stock_name'),
+            stock_alert: idx('stock_alert'),
+            vat_type: idx('vat_type'),
+            warranty_sticker: idx('warranty_sticker'),
+            supplier: idx('supplier'),
+            battery_percentage: idx('battery_percentage'),
+            serial_number: idx('serial_number'),
+            product_note: idx('product_note')
+          };
+          const rows = lines.slice(1);
+          if (rows.length === 0) {
+            throw new Error('Le fichier CSV est vide');
+          }
+          startImport(rows.length);
+          const importErrors: { line: number; message: string }[] = [];
+          let successCount = 0;
+          const normDec = (v: string) => (v || '').replace(/,/g, '.');
+
+          for (let i = 0; i < rows.length; i++) {
+            try {
+              const fields = rows[i].split(',').map(field => field?.trim() || '');
+              const get = (ix: number) => (ix >= 0 ? (fields[ix] ?? '').trim() : '');
+              const sku_parent = get(col.sku_parent);
+              const purchase_price_with_fees = normDec(get(col.purchase_price_with_fees));
+              const retail_price = normDec(get(col.retail_price));
+              const pro_price = normDec(get(col.pro_price));
+              const raw_purchase_price = normDec(get(col.raw_purchase_price));
+              const stock_name_val = get(col.stock_name);
+              const vat_type = get(col.vat_type) || 'normal';
+              const warranty_sticker = get(col.warranty_sticker);
+              const supplier = get(col.supplier);
+              const battery_percentage = normDec(get(col.battery_percentage));
+              const serial_number = get(col.serial_number);
+              const product_note = get(col.product_note);
+
+              if (!serial_number || !purchase_price_with_fees || !supplier || !stock_name_val) {
+                throw new Error(`Champs obligatoires manquants (serial_number, purchase_price_with_fees, supplier, stock_name) à la ligne ${i + 2}`);
+              }
+
+              // Valider que le SKU parent correspond au parent courant (si renseigné)
+              if (initialProduct?.sku && sku_parent && sku_parent !== initialProduct.sku) {
+                throw new Error(`SKU parent "${sku_parent}" ne correspond pas au parent courant "${initialProduct.sku}"`);
+              }
+
+              // Résoudre le stock: utiliser stock_id direct si fourni, sinon stock_name
+              let stockId: string | null = null;
+              if (stock_name_val) {
+                const stk = stocks.find(s => s.name.toLowerCase() === stock_name_val.toLowerCase());
+                if (stk) {
+                  stockId = stk.id;
+                } else {
+                  throw new Error(`Stock "${stock_name_val}" non trouvé`);
+                }
+              } else {
+                throw new Error('Champ stock_name manquant');
+              }
+
+              const serialProductData: any = {
+                name: initialProduct?.name,
+                sku: `${initialProduct?.sku}-${serial_number}`,
+                serial_number,
+                purchase_price_with_fees: parseFloat(purchase_price_with_fees),
+                retail_price: (vat_type || 'normal') === 'normal'
+                  ? (retail_price ? Number((parseFloat(retail_price) * 1.2).toFixed(2)) : null)
+                  : (retail_price ? parseFloat(retail_price) : null),
+                pro_price: (vat_type || 'normal') === 'normal'
+                  ? (pro_price ? Number((parseFloat(pro_price) * 1.2).toFixed(2)) : null)
+                  : (pro_price ? parseFloat(pro_price) : null),
+                raw_purchase_price: raw_purchase_price ? parseFloat(raw_purchase_price) : parseFloat(purchase_price_with_fees),
+                vat_type: vat_type || 'normal',
+                warranty_sticker: warranty_sticker || null,
+                supplier,
+                battery_level: battery_percentage ? parseInt(battery_percentage) : null,
+                product_note: product_note || null,
+                parent_id: initialProduct?.id,
+                is_parent: false,
+                stock: 1,
+                // Copier les attributs du parent (optionnel)
+                category_id: initialProduct?.category_id,
+                weight_grams: initialProduct?.weight_grams,
+                width_cm: initialProduct?.width_cm,
+                height_cm: initialProduct?.height_cm,
+                depth_cm: initialProduct?.depth_cm,
+                description: initialProduct?.description,
+                ean: initialProduct?.ean,
+                variants: (initialProduct as any)?.variants,
+                images: initialProduct?.images
+              };
+
+              // Vérifier doublon éventuel sur le SKU enfant avant insertion
+              const childSku = `${initialProduct?.sku}-${serial_number}`;
+              const { data: existingChild } = await supabase
+                .from('products')
+                .select('id')
+                .eq('sku', childSku as any)
+                .maybeSingle();
+
+              if (Array.isArray(existingChild) && existingChild.length > 0) {
+                throw new Error(`SKU enfant déjà existant: ${childSku}`);
+              }
+
+              const created = await addSerialChild(serialProductData as any);
+              const newChildId = (created as any)?.id;
+              if (!newChildId) {
+                throw new Error('Création du produit sérialisé échouée');
+              }
+
+              // Allocation directe 1 unité dans stock_produit
+              const { error: stockInsertError } = await supabase
+                .from('stock_produit')
+                .insert([{ produit_id: newChildId as any, stock_id: stockId as any, quantite: 1 } as any]);
+
+              if (stockInsertError) {
+                throw new Error(`Échec insertion stock_produit: ${stockInsertError.message}`);
+              }
+              successCount++;
+              incrementProgress();
+            } catch (err) {
+              console.error('Error importing serial product:', err);
+              importErrors.push({
+                line: i + 2,
+                message: `Erreur avec la ligne ${rows[i]}: ${err instanceof Error ? err.message : 'Erreur inconnue'}`
+              });
+            }
+          }
+
+          if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+          }
+
+          if (importErrors.length > 0) {
+            setImportError(importErrors);
+          } else {
+            setImportSuccess(`${successCount} produits sérialisés importés avec succès`);
+          }
+
+          if (onSubmitSuccess) {
+            onSubmitSuccess();
+          }
+          return;
+        } catch (e) {
+          console.error('Error importing serial CSV:', e);
+          if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+          }
+          setImportError([{
+            line: 0,
+            message: 'Erreur lors de l\'importation des numéros de série'
+          }]);
+          return;
+        }
+      }
+
       const rows = text.split('\n').filter(row => row.trim());
       const headers = rows[0].split(',').map(h => h.trim());
       const products = rows.slice(1).map(row => {
@@ -291,9 +514,10 @@ export const ProductForm: React.FC<ProductFormProps> = ({
         try {
           const { data: existingProduct } = await supabase
             .from('products')
-            .select('id, stock')
+            .select('id, stock, ean')
             .eq('sku', product.sku)
             .single();
+          const existingProductAny = existingProduct as any;
 
           const category = await addCategory({
             type: product.category_type.toUpperCase(),
@@ -309,7 +533,7 @@ export const ProductForm: React.FC<ProductFormProps> = ({
             pro_price: parseFloat(product.pro_price),
             weight_grams: parseInt(product.weight_grams),
             location: (product.location || '').toUpperCase(),
-            ean: existingProduct?.ean || product.ean,
+            ean: existingProductAny?.ean || product.ean,
             stock: parseInt(product.stock),
             stock_alert: product.stock_alert ? parseInt(product.stock_alert) : null,
             description: product.description || null,
@@ -324,10 +548,10 @@ export const ProductForm: React.FC<ProductFormProps> = ({
             pro_margin_value: product.pro_margin_value ? parseFloat(product.pro_margin_value) : null
           };
 
-          if (existingProduct) {
-            await updateProduct(existingProduct.id, {
+          if (existingProductAny) {
+            await updateProduct(existingProductAny.id, {
               ...productData,
-              stock: existingProduct.stock + parseInt(product.stock)
+              stock: (existingProductAny.stock || 0) + parseInt(product.stock)
             });
           } else {
             await addProduct(productData);
@@ -365,7 +589,120 @@ export const ProductForm: React.FC<ProductFormProps> = ({
     }
   };
 
-  const downloadSampleCSV = () => {
+  const downloadSampleCSV = async (isSerialImport = false) => {
+    console.log('downloadSampleCSV called with:', {
+      isSerialImport,
+      isSerialHostingParent,
+      hasInitialProduct: !!initialProduct,
+      initialProductId: initialProduct?.id,
+      initialProductName: initialProduct?.name,
+      initialProductSku: initialProduct?.sku,
+      initialProductIsParent: initialProduct?.is_parent,
+      initialProductVariants: initialProduct?.variants
+    });
+    
+      if (isSerialImport && isSerialHostingParent) {
+        // CSV pour l'import de numéros de série (avec colonnes imposées et SKU parent prérempli)
+        const headers = [
+          'sku_parent',
+          'serial_number',
+          'purchase_price_with_fees',
+          'retail_price',
+          'pro_price',
+          'raw_purchase_price',
+          'vat_type',
+          'stock_name',
+          'supplier',
+          'battery_percentage',
+          'warranty_sticker',
+          'product_note'
+        ];
+
+        const firstStockName = (stocks[0]?.name) || 'STOCK-NAME-1';
+        const secondStockName = (stocks[1]?.name) || firstStockName;
+
+        // Ligne A: TVA normale, retail/pro en HT (conversion TTC faite à l'import)
+        const rowA = [
+          initialProduct?.sku || '',
+          'SN123456789',
+          '900.00',
+          '1200.00',
+          '1100.00',
+          '850.00',
+          'normal',
+          firstStockName,
+          'FOURNISSEUR-EXEMPLE',
+          '85',
+          'present',
+          'Notes optionnelles'
+        ];
+
+        // Ligne B: TVA sur marge, retail/pro tels quels
+        const rowB = [
+          initialProduct?.sku || '',
+          'SN987654321',
+          '900.00',
+          '1150.00',
+          '1050.00',
+          '',
+          'margin',
+          secondStockName,
+          'FOURNISSEUR-EXEMPLE',
+          '80',
+          'absent',
+          ''
+        ];
+
+        // Annexes dynamiques
+        const stocksSection = [
+          '',
+          '# Stocks disponibles (stock_name)',
+          ...stocks.map(s => s.name)
+        ];
+
+        // Essayer de lister dynamiquement les fournisseurs existants (fallback exemple)
+        let supplierNames: string[] = [];
+        try {
+          const { data: supplierRows, error: supplierErr } = await supabase
+            .from('products')
+            .select('supplier');
+          if (!supplierErr && Array.isArray(supplierRows)) {
+            const set = new Set(
+              supplierRows
+                .map((r: any) => (r?.supplier || '').toString().trim())
+                .filter((v: string) => v.length > 0)
+            );
+            supplierNames = Array.from(set).sort((a, b) => a.localeCompare(b));
+          }
+        } catch (e) {
+          // ignore and use fallback
+        }
+        const suppliersSection = [
+          '',
+          '# Suppliers disponibles (supplier)',
+          ...(supplierNames.length ? supplierNames : ['FOURNISSEUR-EXEMPLE'])
+        ];
+
+        const csvContent = [
+          headers.join(','),
+          rowA.join(','),
+          rowB.join(','),
+          ...stocksSection,
+          ...suppliersSection
+        ].join('\n');
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `serial_numbers_template_${initialProduct.sku.replace(/[^a-zA-Z0-9]/g, '_')}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      console.log('Serial numbers CSV template downloaded');
+      return;
+    }
+
+    // CSV générique pour les produits (logique existante)
     const headers = [
       'name',
       'sku',
@@ -503,41 +840,14 @@ export const ProductForm: React.FC<ProductFormProps> = ({
         margin_percent: retailPrice.margin ? parseFloat(retailPrice.margin) : null,
         margin_value: retailPrice.ttc ? parseFloat(retailPrice.ttc) : null,
         pro_margin_percent: proPrice.margin ? parseFloat(proPrice.margin) : null,
-        pro_margin_value: proPrice.ttc ? parseFloat(proPrice.ttc) : null
+        pro_margin_value: proPrice.ttc ? parseFloat(proPrice.ttc) : null,
+        parent_id: null,
+        is_parent: true
       };
 
       if (initialProduct) {
         await updateProduct(initialProduct.id, productData);
         
-        // Synchronisation des produits miroirs
-        const updateMirrorProducts = async (updatedFields: any) => {
-          if (initialProduct.shared_stock_id) {
-            console.log('Updating mirror products with shared_stock_id:', initialProduct.shared_stock_id);
-            const { error } = await supabase
-              .from('products')
-              .update(updatedFields)
-              .eq('shared_stock_id', initialProduct.shared_stock_id)
-              .neq('id', initialProduct.id);
-            
-            if (error) {
-              console.error('Error updating mirror products:', error);
-            } else {
-              console.log('Mirror products updated successfully');
-            }
-          }
-        };
-        
-        // Champs à synchroniser entre les produits miroirs
-        await updateMirrorProducts({
-          purchase_price_with_fees: productData.purchase_price_with_fees,
-          retail_price: productData.retail_price,
-          pro_price: productData.pro_price,
-          vat_type: productData.vat_type,
-          margin_percent: productData.margin_percent,
-          margin_value: productData.margin_value,
-          pro_margin_percent: productData.pro_margin_percent,
-          pro_margin_value: productData.pro_margin_value
-        });
         
         if (onSubmitSuccess) {
           onSubmitSuccess();
@@ -584,21 +894,21 @@ export const ProductForm: React.FC<ProductFormProps> = ({
       <div className="bg-blue-50 p-4 rounded-lg">
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-2">
-            <p className="text-blue-700">Vous avez plusieurs produits à créer ? 📦</p>
-            <ArrowDown className="text-blue-500 animate-bounce" size={20} />
+            <p className="text-blue-700">Ajouter plusieurs numéros de série au parent ? 📦</p>
+            <ArrowRight className="text-blue-500 animate-bounce" size={20} />
           </div>
           <div className="flex items-center space-x-4">
             <button
               type="button"
-              onClick={downloadSampleCSV}
+              onClick={() => downloadSampleCSV(isSerialHostingParent)}
               className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
             >
               <Download size={18} />
-              Télécharger un modèle CSV 📥
+              {isSerialHostingParent ? 'Télécharger modèle CSV numéros de série 📥' : 'Télécharger un modèle CSV 📥'}
             </button>
             <label className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 cursor-pointer">
               <Upload size={18} />
-              Importer un fichier CSV 📂
+              {isSerialHostingParent ? 'Importer numéros de série CSV 📂' : 'Importer un fichier CSV 📂'}
               <input
                 type="file"
                 onChange={handleFileUpload}
@@ -709,23 +1019,25 @@ export const ProductForm: React.FC<ProductFormProps> = ({
               placeholder="SKU"
             />
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Localisation <span className="text-red-500">*</span>
-            </label>
-            <input
-              type="text"
-              name="location"
-              value={formData.location}
-              onChange={(e) => setFormData(prev => ({ 
-                ...prev, 
-                location: e.target.value.toUpperCase() 
-              }))}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md"
-              placeholder="EMPLACEMENT"
-              required
-            />
-          </div>
+          {!isParentProduct && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Localisation <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                name="location"
+                value={formData.location}
+                onChange={(e) => setFormData(prev => ({ 
+                  ...prev, 
+                  location: e.target.value.toUpperCase() 
+                }))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="EMPLACEMENT"
+                required
+              />
+            </div>
+          )}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               EAN <span className="text-red-500">*</span>
@@ -754,40 +1066,44 @@ export const ProductForm: React.FC<ProductFormProps> = ({
               placeholder="Poids en grammes"
             />
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Type de TVA <span className="text-red-500">*</span>
-            </label>
-            <select
-              name="vat_type"
-              value={formData.vat_type}
-              onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md"
-              required
-            >
-              <option value="normal">TVA normale</option>
-              <option value="margin">TVA sur marge</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Prix d'achat HT <span className="text-red-500">*</span>
-            </label>
-            <div className="relative">
-              <input
-                type="text"
-                name="purchase_price_with_fees"
-                value={formData.purchase_price_with_fees}
+          {!isParentProduct && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Type de TVA <span className="text-red-500">*</span>
+              </label>
+              <select
+                name="vat_type"
+                value={formData.vat_type}
                 onChange={handleChange}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md"
                 required
-                placeholder="Prix d'achat"
-              />
-              <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500">
-                HT
-              </span>
+              >
+                <option value="normal">TVA normale</option>
+                <option value="margin">TVA sur marge</option>
+              </select>
             </div>
-          </div>
+          )}
+          {!isParentProduct && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Prix d'achat HT <span className="text-red-500">*</span>
+              </label>
+              <div className="relative">
+                <input
+                  type="text"
+                  name="purchase_price_with_fees"
+                  value={formData.purchase_price_with_fees}
+                  onChange={handleChange}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    required
+                  placeholder="Prix d'achat"
+                />
+                <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+                  HT
+                </span>
+              </div>
+            </div>
+          )}
         </div>
 
         <div>
@@ -843,274 +1159,280 @@ export const ProductForm: React.FC<ProductFormProps> = ({
           </div>
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Prix de vente magasin <span className="text-red-500">*</span>
-          </label>
-          <div className="grid grid-cols-3 gap-4">
-            <div className="relative">
-              <input
-                type="text"
-                value={retailPrice.ht}
-                onChange={(e) => {
-                  const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
-                  const ht = parseFloat(e.target.value) || 0;
-                  if (formData.vat_type === "margin") {
-                    // Marge brute = prix vente TTC - prix achat
-                    const pv = ht;
-                    const margeBrute = pv - purchase;
-                    const margeNette = margeBrute / 1.2;
-                    const margePercent = purchase > 0 ? (margeNette / purchase) * 100 : 0;
-                    setRetailPrice({
-                      ht: e.target.value,
-                      margin: margePercent.toFixed(2),
-                      ttc: margeNette.toFixed(2)
-                    });
-                  } else {
-                    setRetailPrice(prev => ({
-                      ...prev,
-                      ht: e.target.value,
-                      margin: calculateMargin(
-                        purchase,
-                        ht,
-                        formData.vat_type
-                      ).toFixed(2),
-                      ttc: calculateTTC(ht, formData.vat_type, purchase).toFixed(2)
-                    }));
-                  }
-                }}
-                className="w-full px-3 py-2 pr-8 border border-gray-300 rounded-md"
-                placeholder={formData.vat_type === 'margin' ? "Prix TVM" : "Prix HT"}
-                required
-              />
-              <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500">
-                {formData.vat_type === 'margin' ? "TVM" : "HT"}
-              </span>
-            </div>
-            <div className="relative">
-              <input
-                type="text"
-                value={retailPrice.margin}
-                onChange={(e) => {
-                  const margin = parseFloat(e.target.value) || 0;
-                  const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
-                  if (formData.vat_type === "margin") {
-                    // Marge nette = (prix achat * marge %) / 100
-                    const margeNette = (purchase * margin) / 100;
-                    // Prix de vente TTC = prix achat + (marge nette * 1.2)
-                    const pv = purchase + (margeNette * 1.2);
-                    setRetailPrice({
-                      ht: pv.toFixed(2),
-                      margin: e.target.value,
-                      ttc: margeNette.toFixed(2)
-                    });
-                  } else {
-                    const ht = calculatePriceFromMargin(purchase, margin, formData.vat_type);
-                    setRetailPrice({
-                      ht: ht.toFixed(2),
-                      margin: e.target.value,
-                      ttc: calculateTTC(ht, formData.vat_type, purchase).toFixed(2)
-                    });
-                  }
-                }}
-                className="w-full px-3 py-2 pr-8 border border-gray-300 rounded-md text-green-600"
-                placeholder="Marge"
-                required
-              />
-              <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-green-600">
-                %
-              </span>
-            </div>
-            <div className="relative">
-              <input
-                type="text"
-                value={retailPrice.ttc}
-                onChange={(e) => {
-                  const value = parseFloat(e.target.value) || 0;
-                  const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
-                  if (formData.vat_type === "margin") {
-                    // Prix de vente TTC = prix achat + (marge nette * 1.2)
-                    const pv = purchase + (value * 1.2);
-                    // Marge % = (marge nette / prix achat) * 100
-                    const percent = purchase > 0 ? (value / purchase) * 100 : 0;
-                    setRetailPrice({
-                      ht: pv.toFixed(2),
-                      margin: percent.toFixed(2),
-                      ttc: e.target.value
-                    });
-                  } else {
-                    const ttc = value;
-                    const ht = calculateHT(ttc, formData.vat_type, purchase);
-                    setRetailPrice({
-                      ht: ht.toFixed(2),
-                      margin: calculateMargin(
-                        purchase,
-                        ht,
-                        formData.vat_type
-                      ).toFixed(2),
-                      ttc: e.target.value
-                    });
-                  }
-                }}
-                className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-md"
-                placeholder={formData.vat_type === 'margin' ? "Marge nette" : "Prix TTC"}
-              />
-              <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500">
-                {formData.vat_type === 'margin' ? "€" : "TTC"}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Prix de vente pro <span className="text-red-500">*</span>
-          </label>
-          <div className="grid grid-cols-3 gap-4">
-            <div className="relative">
-              <input
-                type="text"
-                value={proPrice.ht}
-                onChange={(e) => {
-                  const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
-                  const ht = parseFloat(e.target.value) || 0;
-                  if (formData.vat_type === "margin") {
-                    // Marge brute = prix vente TTC - prix achat
-                    const pv = ht;
-                    const margeBrute = pv - purchase;
-                    const margeNette = margeBrute / 1.2;
-                    const margePercent = purchase > 0 ? (margeNette / purchase) * 100 : 0;
-                    setProPrice({
-                      ht: e.target.value,
-                      margin: margePercent.toFixed(2),
-                      ttc: margeNette.toFixed(2)
-                    });
-                  } else {
-                    setProPrice(prev => ({
-                      ...prev,
-                      ht: e.target.value,
-                      margin: calculateMargin(
-                        purchase,
-                        ht,
-                        formData.vat_type
-                      ).toFixed(2),
-                      ttc: calculateTTC(ht, formData.vat_type, purchase).toFixed(2)
-                    }));
-                  }
-                }}
-                className="w-full px-3 py-2 pr-8 border border-gray-300 rounded-md"
-                placeholder={formData.vat_type === 'margin' ? "Prix TVM" : "Prix HT"}
-                required
-              />
-              <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500">
-                {formData.vat_type === 'margin' ? "TVM" : "HT"}
-              </span>
-            </div>
-            <div className="relative">
-              <input
-                type="text"
-                value={proPrice.margin}
-                onChange={(e) => {
-                  const margin = parseFloat(e.target.value) || 0;
-                  const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
-                  if (formData.vat_type === "margin") {
-                    // Marge nette = (prix achat * marge %) / 100
-                    const margeNette = (purchase * margin) / 100;
-                    // Prix de vente TTC = prix achat + (marge nette * 1.2)
-                    const pv = purchase + (margeNette * 1.2);
-                    setProPrice({
-                      ht: pv.toFixed(2),
-                      margin: e.target.value,
-                      ttc: margeNette.toFixed(2)
-                    });
-                  } else {
-                    const ht = calculatePriceFromMargin(purchase, margin, formData.vat_type);
-                    setProPrice({
-                      ht: ht.toFixed(2),
-                      margin: e.target.value,
-                      ttc: calculateTTC(ht, formData.vat_type, purchase).toFixed(2)
-                    });
-                  }
-                }}
-                className="w-full px-3 py-2 pr-8 border border-gray-300 rounded-md text-green-600"
-                placeholder="Marge"
-                required
-              />
-              <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-green-600">
-                %
-              </span>
-            </div>
-            <div className="relative">
-              <input
-                type="text"
-                value={proPrice.ttc}
-                onChange={(e) => {
-                  const value = parseFloat(e.target.value) || 0;
-                  const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
-                  if (formData.vat_type === "margin") {
-                    // Prix de vente TTC = prix achat + (marge nette * 1.2)
-                    const pv = purchase + (value * 1.2);
-                    // Marge % = (marge nette / prix achat) * 100
-                    const percent = purchase > 0 ? (value / purchase) * 100 : 0;
-                    setProPrice({
-                      ht: pv.toFixed(2),
-                      margin: percent.toFixed(2),
-                      ttc: e.target.value
-                    });
-                  } else {
-                    const ttc = value;
-                    const ht = calculateHT(ttc, formData.vat_type, purchase);
-                    setProPrice({
-                      ht: ht.toFixed(2),
-                      margin: calculateMargin(
-                        purchase,
-                        ht,
-                        formData.vat_type
-                      ).toFixed(2),
-                      ttc: e.target.value
-                    });
-                  }
-                }}
-                className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-md"
-                placeholder={formData.vat_type === 'margin' ? "Marge nette" : "Prix TTC"}
-              />
-              <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500">
-                {formData.vat_type === 'margin' ? "€" : "TTC"}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
+        {!isParentProduct && (
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Stock global <span className="text-red-500">*</span>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Prix de vente magasin <span className="text-red-500">*</span>
             </label>
-            <input
-              type="text"
-              name="stock"
-              value={formData.stock}
-              onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md"
-              required
-              min="0"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Alerte stock <span className="text-red-500">*</span>
-            </label>
-            <input
-              type="text"
-              name="stock_alert"
-              value={formData.stock_alert}
-              onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md"
-              required
-              min="0"
-            />
-          </div>
-        </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="relative">
+                <input
+                  type="text"
+                  value={retailPrice.ht}
+                  onChange={(e) => {
+                    const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
+                    const ht = parseFloat(e.target.value) || 0;
+                    if (formData.vat_type === "margin") {
+                      // Marge brute = prix vente TTC - prix achat
+                      const pv = ht;
+                      const margeBrute = pv - purchase;
+                      const margeNette = margeBrute / 1.2;
+                      const margePercent = purchase > 0 ? (margeNette / purchase) * 100 : 0;
+                      setRetailPrice({
+                        ht: e.target.value,
+                        margin: margePercent.toFixed(2),
+                        ttc: margeNette.toFixed(2)
+                      });
+                    } else {
+                      setRetailPrice(prev => ({
+                        ...prev,
+                        ht: e.target.value,
+                        margin: calculateMargin(
+                          purchase,
+                          ht,
+                          formData.vat_type
+                        ).toFixed(2),
+                        ttc: calculateTTC(ht, formData.vat_type, purchase).toFixed(2)
+                      }));
+                    }
+                  }}
+                  className="w-full px-3 py-2 pr-8 border border-gray-300 rounded-md"
+                  placeholder={formData.vat_type === 'margin' ? "Prix TVM" : "Prix HT"}
+                  required
+                />
+                <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+                  {formData.vat_type === 'margin' ? "TVM" : "HT"}
+                </span>
+              </div>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={retailPrice.margin}
+                  onChange={(e) => {
+                    const margin = parseFloat(e.target.value) || 0;
+                    const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
+                    if (formData.vat_type === "margin") {
+                      // Marge nette = (prix achat * marge %) / 100
+                      const margeNette = (purchase * margin) / 100;
+                      // Prix de vente TTC = prix achat + (marge nette * 1.2)
+                      const pv = purchase + (margeNette * 1.2);
+                      setRetailPrice({
+                        ht: pv.toFixed(2),
+                        margin: e.target.value,
+                        ttc: margeNette.toFixed(2)
+                      });
+                    } else {
+                      const ht = calculatePriceFromMargin(purchase, margin, formData.vat_type);
+                      setRetailPrice({
+                        ht: ht.toFixed(2),
+                        margin: e.target.value,
+                        ttc: calculateTTC(ht, formData.vat_type, purchase).toFixed(2)
+                      });
+                    }
+                  }}
+                  className="w-full px-3 py-2 pr-8 border border-gray-300 rounded-md text-green-600"
+                  placeholder="Marge"
+                  required
+                />
+                  <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-green-600">
+                    %
+                  </span>
+                </div>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={retailPrice.ttc}
+                    onChange={(e) => {
+                      const value = parseFloat(e.target.value) || 0;
+                      const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
+                      if (formData.vat_type === "margin") {
+                        // Prix de vente TTC = prix achat + (marge nette * 1.2)
+                        const pv = purchase + (value * 1.2);
+                        // Marge % = (marge nette / prix achat) * 100
+                        const percent = purchase > 0 ? (value / purchase) * 100 : 0;
+                        setRetailPrice({
+                          ht: pv.toFixed(2),
+                          margin: percent.toFixed(2),
+                          ttc: e.target.value
+                        });
+                      } else {
+                        const ttc = value;
+                        const ht = calculateHT(ttc, formData.vat_type, purchase);
+                        setRetailPrice({
+                          ht: ht.toFixed(2),
+                          margin: calculateMargin(
+                            purchase,
+                            ht,
+                            formData.vat_type
+                          ).toFixed(2),
+                          ttc: e.target.value
+                        });
+                      }
+                    }}
+                    className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-md"
+                    placeholder={formData.vat_type === 'margin' ? "Marge nette" : "Prix TTC"}
+                  />
+                  <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+                    {formData.vat_type === 'margin' ? "€" : "TTC"}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!isParentProduct && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Prix de vente pro <span className="text-red-500">*</span>
+              </label>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={proPrice.ht}
+                    onChange={(e) => {
+                      const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
+                      const ht = parseFloat(e.target.value) || 0;
+                      if (formData.vat_type === "margin") {
+                        // Marge brute = prix vente TTC - prix achat
+                        const pv = ht;
+                        const margeBrute = pv - purchase;
+                        const margeNette = margeBrute / 1.2;
+                        const margePercent = purchase > 0 ? (margeNette / purchase) * 100 : 0;
+                        setProPrice({
+                          ht: e.target.value,
+                          margin: margePercent.toFixed(2),
+                          ttc: margeNette.toFixed(2)
+                        });
+                      } else {
+                        setProPrice(prev => ({
+                          ...prev,
+                          ht: e.target.value,
+                          margin: calculateMargin(
+                            purchase,
+                            ht,
+                            formData.vat_type
+                          ).toFixed(2),
+                          ttc: calculateTTC(ht, formData.vat_type, purchase).toFixed(2)
+                        }));
+                      }
+                    }}
+                    className="w-full px-3 py-2 pr-8 border border-gray-300 rounded-md"
+                    placeholder={formData.vat_type === 'margin' ? "Prix TVM" : "Prix HT"}
+                    required
+                  />
+                  <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+                    {formData.vat_type === 'margin' ? "TVM" : "HT"}
+                  </span>
+                </div>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={proPrice.margin}
+                    onChange={(e) => {
+                      const margin = parseFloat(e.target.value) || 0;
+                      const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
+                      if (formData.vat_type === "margin") {
+                        // Marge nette = (prix achat * marge %) / 100
+                        const margeNette = (purchase * margin) / 100;
+                        // Prix de vente TTC = prix achat + (marge nette * 1.2)
+                        const pv = purchase + (margeNette * 1.2);
+                        setProPrice({
+                          ht: pv.toFixed(2),
+                          margin: e.target.value,
+                          ttc: margeNette.toFixed(2)
+                        });
+                      } else {
+                        const ht = calculatePriceFromMargin(purchase, margin, formData.vat_type);
+                        setProPrice({
+                          ht: ht.toFixed(2),
+                          margin: e.target.value,
+                          ttc: calculateTTC(ht, formData.vat_type, purchase).toFixed(2)
+                        });
+                      }
+                    }}
+                    className="w-full px-3 py-2 pr-8 border border-gray-300 rounded-md text-green-600"
+                    placeholder="Marge"
+                    required
+                  />
+                  <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-green-600">
+                    %
+                  </span>
+                </div>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={proPrice.ttc}
+                    onChange={(e) => {
+                      const value = parseFloat(e.target.value) || 0;
+                      const purchase = parseFloat(formData.purchase_price_with_fees) || 0;
+                      if (formData.vat_type === "margin") {
+                        // Prix de vente TTC = prix achat + (marge nette * 1.2)
+                        const pv = purchase + (value * 1.2);
+                        // Marge % = (marge nette / prix achat) * 100
+                        const percent = purchase > 0 ? (value / purchase) * 100 : 0;
+                        setProPrice({
+                          ht: pv.toFixed(2),
+                          margin: percent.toFixed(2),
+                          ttc: e.target.value
+                        });
+                      } else {
+                        const ttc = value;
+                        const ht = calculateHT(ttc, formData.vat_type, purchase);
+                        setProPrice({
+                          ht: ht.toFixed(2),
+                          margin: calculateMargin(
+                            purchase,
+                            ht,
+                            formData.vat_type
+                          ).toFixed(2),
+                          ttc: e.target.value
+                        });
+                      }
+                    }}
+                    className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-md"
+                    placeholder={formData.vat_type === 'margin' ? "Marge nette" : "Prix TTC"}
+                  />
+                  <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+                    {formData.vat_type === 'margin' ? "€" : "TTC"}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!isParentProduct && (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Stock global <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  name="stock"
+                  value={formData.stock}
+                  onChange={handleChange}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  required
+                  min="0"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Alerte stock <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  name="stock_alert"
+                  value={formData.stock_alert}
+                  onChange={handleChange}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  required
+                  min="0"
+                />
+              </div>
+            </div>
+          )}
 
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -1137,10 +1459,11 @@ export const ProductForm: React.FC<ProductFormProps> = ({
           </button>
         </div>
 
+
         <div>
           <button
             type="submit"
-            className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700"
+            className="px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700"
           >
             {initialProduct ? 'Mettre à jour' : 'Ajouter le produit'}
           </button>
@@ -1175,6 +1498,13 @@ export const ProductForm: React.FC<ProductFormProps> = ({
         status={importState.status}
         errors={importState.errors}
       />
+      {toast && (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast(null)}
+        />
+      )}
     </div>
   );
 };
