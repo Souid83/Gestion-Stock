@@ -9,7 +9,8 @@ export const VariantManagement: React.FC = () => {
   const [newVariant, setNewVariant] = useState({
     color: '',
     grade: '',
-    capacity: ''
+    capacity: '',
+    sim_type: ''
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const {
@@ -40,7 +41,7 @@ export const VariantManagement: React.FC = () => {
     e.preventDefault();
     try {
       await addVariant(newVariant);
-      setNewVariant({ color: '', grade: '', capacity: '' });
+      setNewVariant({ color: '', grade: '', capacity: '', sim_type: '' });
     } catch (error) {
       console.error('Error adding variant:', error);
     }
@@ -88,8 +89,20 @@ export const VariantManagement: React.FC = () => {
       const variants = rows
         .filter(row => row.trim())
         .map(row => {
-          const [color, grade, capacity] = row.split(',').map(field => field.trim());
-          return { color, grade, capacity };
+          const [color, grade, capacity, sim_type] = row.split(',').map(field => field.trim());
+          
+          // Validation de la capacité : doit être un nombre
+          const capacityNum = parseInt(capacity);
+          if (isNaN(capacityNum) || capacityNum < 0) {
+            throw new Error(`Capacité invalide "${capacity}" - seuls les chiffres sont autorisés`);
+          }
+          
+          return { 
+            color: color.toUpperCase(), 
+            grade: grade.toUpperCase(), 
+            capacity: capacityNum.toString(), 
+            sim_type: (sim_type || '').toUpperCase() 
+          };
         });
 
       startImport(variants.length);
@@ -98,13 +111,19 @@ export const VariantManagement: React.FC = () => {
       for (let i = 0; i < variants.length; i++) {
         try {
           const variant = variants[i];
+          
+          // Validation supplémentaire avant ajout
+          if (!variant.color || !variant.grade || !variant.capacity) {
+            throw new Error('Couleur, grade et capacité sont obligatoires');
+          }
+          
           await addVariant(variant);
           incrementProgress();
         } catch (err) {
           console.error('Error importing variant:', err);
           importErrors.push({
             line: i + 2,
-            message: `Erreur avec la variante ${variant.color} ${variant.grade} ${variant.capacity}: ${err instanceof Error ? err.message : 'Erreur inconnue'}`
+            message: `Erreur avec la variante ${variants[i]?.color || ''} ${variants[i]?.grade || ''} ${variants[i]?.capacity || ''} ${variants[i]?.sim_type || ''}: ${err instanceof Error ? err.message : 'Erreur inconnue'}`
           });
         }
       }
@@ -122,13 +141,13 @@ export const VariantManagement: React.FC = () => {
       console.error('Error processing CSV:', error);
       setImportError([{
         line: 0,
-        message: 'Erreur lors de l\'importation du fichier CSV'
+        message: error instanceof Error ? error.message : 'Erreur lors de l\'importation du fichier CSV'
       }]);
     }
   };
 
   const downloadSampleCSV = () => {
-    const csvContent = 'Color,Grade,Capacity\nNOIR,A+,128GO\nBLANC,A,256GO';
+    const csvContent = 'Color,Grade,Capacity,SimType\nNOIR,A+,128,1 SIM\nBLANC,A,256,ESIM';
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
@@ -173,7 +192,7 @@ export const VariantManagement: React.FC = () => {
       {/* Add Variant Form */}
       <div className="bg-white rounded-lg shadow p-6">
         <h2 className="text-lg font-semibold mb-4">Ajouter une variante</h2>
-        <form onSubmit={handleSubmit} className="grid grid-cols-3 gap-4">
+        <form onSubmit={handleSubmit} className="grid grid-cols-4 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Couleur
@@ -181,8 +200,9 @@ export const VariantManagement: React.FC = () => {
             <input
               type="text"
               value={newVariant.color}
-              onChange={(e) => setNewVariant(prev => ({ ...prev, color: e.target.value }))}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md uppercase"
+              onChange={(e) => setNewVariant(prev => ({ ...prev, color: e.target.value.toUpperCase() }))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+              style={{ textTransform: 'uppercase' }}
               required
               placeholder="ex: NOIR"
             />
@@ -194,26 +214,48 @@ export const VariantManagement: React.FC = () => {
             <input
               type="text"
               value={newVariant.grade}
-              onChange={(e) => setNewVariant(prev => ({ ...prev, grade: e.target.value }))}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md uppercase"
+              onChange={(e) => setNewVariant(prev => ({ ...prev, grade: e.target.value.toUpperCase() }))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+              style={{ textTransform: 'uppercase' }}
               required
               placeholder="ex: A+"
             />
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Capacité
+              Capacité en GO
+            </label>
+            <input
+              type="number"
+              value={newVariant.capacity}
+              onChange={(e) => {
+                const value = e.target.value;
+                // N'autoriser que les chiffres entiers positifs
+                if (value === '' || (/^\d+$/.test(value) && parseInt(value) >= 0)) {
+                  setNewVariant(prev => ({ ...prev, capacity: value }));
+                }
+              }}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+              required
+              placeholder="ex: 128"
+              min="0"
+              step="1"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Type de SIM
             </label>
             <input
               type="text"
-              value={newVariant.capacity}
-              onChange={(e) => setNewVariant(prev => ({ ...prev, capacity: e.target.value }))}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md uppercase"
-              required
-              placeholder="ex: 128GO"
+              value={newVariant.sim_type}
+              onChange={(e) => setNewVariant(prev => ({ ...prev, sim_type: e.target.value.toUpperCase() }))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+              style={{ textTransform: 'uppercase' }}
+              placeholder="ex: 1 Sim / Esim"
             />
           </div>
-          <div className="col-span-3">
+          <div className="col-span-4">
             <button
               type="submit"
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
@@ -262,7 +304,10 @@ export const VariantManagement: React.FC = () => {
                   Grade
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Capacité
+                  CAPACITÉ EN GO
+                </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Type de SIM
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Actions
@@ -290,6 +335,9 @@ export const VariantManagement: React.FC = () => {
                     {variant.capacity}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    {variant.sim_type || '-'}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                     <button
                       onClick={() => deleteVariant(variant.id)}
                       className="text-red-600 hover:text-red-800"
@@ -302,7 +350,7 @@ export const VariantManagement: React.FC = () => {
               ))}
               {variants.length === 0 && !isLoading && (
                 <tr>
-                  <td colSpan={5} className="px-6 py-4 text-center text-gray-500">
+                  <td colSpan={6} className="px-6 py-4 text-center text-gray-500">
                     Aucune variante trouvée
                   </td>
                 </tr>
