@@ -12,7 +12,7 @@ interface Stock {
   };
 }
 
-interface StockAllocation {
+interface ProductStock {
   id?: string;
   stock_id: string;
   stock_name?: string;
@@ -34,7 +34,7 @@ export const StockManager: React.FC<StockManagerProps> = ({
   onStockUpdate
 }) => {
   const [stocks, setStocks] = useState<Stock[]>([]);
-  const [allocations, setAllocations] = useState<StockAllocation[]>([]);
+  const [allocations, setAllocations] = useState<ProductStock[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [totalAllocated, setTotalAllocated] = useState(0);
@@ -43,6 +43,8 @@ export const StockManager: React.FC<StockManagerProps> = ({
   const [selectedStockId, setSelectedStockId] = useState('');
   const [quantity, setQuantity] = useState(0);
   const [hasChanges, setHasChanges] = useState(false);
+  const [isMirrorProduct, setIsMirrorProduct] = useState(false);
+  const [mirrorProductInfo, setMirrorProductInfo] = useState<{id: string, name: string} | null>(null);
 
   useEffect(() => {
     if (isOpen && productId) {
@@ -69,52 +71,97 @@ export const StockManager: React.FC<StockManagerProps> = ({
       // Fetch product details
       const { data: productData, error: productError } = await supabase
         .from('products')
-        .select('name, stock')
+        .select('name, stock, mirror_of')
         .eq('id', productId)
         .single();
 
-      if (productError) throw productError;
-      setProductName(productData.name);
-      setGlobalStock(productData.stock || 0);
-
-      // Fetch all available stocks
-      const { data: stocksData, error: stocksError } = await supabase
-        .from('stocks')
-        .select(`
-          *,
-          group:stock_groups(name, synchronizable)
-        `)
-        .order('name');
-
-      if (stocksError) throw stocksError;
-      setStocks(stocksData || []);
-
-      // Fetch product's current stocks
-      const { data: productStocksData, error: productStocksError } = await supabase
-        .from('stock_produit')
-        .select(`
-          id,
-          stock_id,
-          quantite,
-          stock:stocks(
+      if (productError || !productData) throw productError || new Error('Product not found');
+      setProductName((productData as any).name);
+      setGlobalStock((productData as any).stock || 0);
+      
+      // Check if this is a mirror product
+      if ((productData as any).mirror_of) {
+        setIsMirrorProduct(true);
+        
+        // Fetch mirror source product
+        const { data: mirrorSourceData, error: mirrorSourceError } = await supabase
+          .from('products')
+          .select('id, name')
+          .eq('id', (productData as any).mirror_of)
+          .single();
+          
+        if (mirrorSourceError || !mirrorSourceData) throw mirrorSourceError || new Error('Mirror source not found');
+        setMirrorProductInfo(mirrorSourceData as any);
+        
+        // For mirror products, fetch stock allocations of the source product
+        const { data: mirrorStocksData, error: mirrorStocksError } = await supabase
+          .from('stock_produit')
+          .select(`
+            id,
+            stock_id,
+            quantite,
+            stock:stocks(
+              name,
+              group:stock_groups(name)
+            )
+          `)
+          .eq('produit_id', (productData as any).mirror_of);
+          
+        if (mirrorStocksError) throw mirrorStocksError;
+        
+        const transformedAllocations = mirrorStocksData?.map((ps: any) => ({
+          id: ps.id,
+          stock_id: ps.stock_id,
+          stock_name: ps.stock.name,
+          group_name: ps.stock.group?.name,
+          quantity: ps.quantite
+        })) || [];
+        
+        setAllocations(transformedAllocations);
+        setHasChanges(false);
+      } else {
+        // Fetch all available stocks
+        const { data: stocksData, error: stocksError } = await supabase
+          .from('stocks')
+          .select(`
+            id,
             name,
-            group:stock_groups(name)
-          )
-        `)
-        .eq('produit_id', productId);
+            group_id,
+            group:stock_groups(name, synchronizable)
+          `)
+          .order('name');
 
-      if (productStocksError) throw productStocksError;
+        if (stocksError) throw stocksError;
+        setStocks((stocksData as any) || []);
 
-      const transformedAllocations = productStocksData?.map(ps => ({
-        id: ps.id,
-        stock_id: ps.stock_id,
-        stock_name: ps.stock.name,
-        group_name: ps.stock.group?.name,
-        quantity: ps.quantite
-      })) || [];
+        // Fetch product's current stocks
+        const { data: productStocksData, error: productStocksError } = await supabase
+          .from('stock_produit')
+          .select(`
+            id,
+            stock_id,
+            quantite,
+            stock:stocks(
+              name,
+              group:stock_groups(name)
+            )
+          `)
+          .eq('produit_id', productId);
 
-      setAllocations(transformedAllocations);
-      setHasChanges(false);
+        if (productStocksError) throw productStocksError;
+
+        const transformedAllocations = productStocksData?.map((ps: any) => ({
+          id: ps.id,
+          stock_id: ps.stock_id,
+          stock_name: ps.stock.name,
+          group_name: ps.stock.group?.name,
+          quantity: ps.quantite
+        })) || [];
+
+        setAllocations(transformedAllocations);
+        setHasChanges(false);
+      }
+      
       setIsLoading(false);
     } catch (err) {
       console.error('Error fetching data:', err);
@@ -138,7 +185,7 @@ export const StockManager: React.FC<StockManagerProps> = ({
       return;
     }
 
-    const newAllocation: StockAllocation = {
+    const newAllocation: ProductStock = {
       stock_id: selectedStock.id,
       stock_name: selectedStock.name,
       group_name: selectedStock.group?.name,
@@ -175,6 +222,11 @@ export const StockManager: React.FC<StockManagerProps> = ({
   };
 
   const handleSave = async () => {
+    if (isMirrorProduct) {
+      setError("Impossible de modifier le stock d'un produit miroir. Le stock est géré par le produit principal.");
+      return;
+    }
+    
     if (totalAllocated !== globalStock) {
       setError(`Le stock total alloué (${totalAllocated}) doit être égal au stock global (${globalStock})`);
       return;
@@ -196,7 +248,7 @@ export const StockManager: React.FC<StockManagerProps> = ({
               produit_id: productId,
               stock_id: allocation.stock_id,
               quantite: allocation.quantity
-            }))
+            })) as any
           );
 
         if (insertError) throw insertError;
@@ -205,7 +257,7 @@ export const StockManager: React.FC<StockManagerProps> = ({
       // Update the product's total stock
       const { error: updateError } = await supabase
         .from('products')
-        .update({ stock_total: totalAllocated })
+        .update({ stock_total: totalAllocated } as any)
         .eq('id', productId);
 
       if (updateError) throw updateError;
@@ -250,42 +302,58 @@ export const StockManager: React.FC<StockManagerProps> = ({
           {/* Product Info */}
           <div className="bg-blue-50 p-4 rounded-lg">
             <h3 className="text-lg font-medium text-blue-900 mb-2">{productName}</h3>
-            <p className="text-blue-800">Stock global : {globalStock}</p>
+            <p className="text-blue-800">Stock global à allouer : {globalStock}</p>
+            
+            {isMirrorProduct && mirrorProductInfo && (
+              <div className="mt-2 p-2 bg-blue-100 rounded-lg">
+                <p className="text-blue-800 flex items-center">
+                  <span className="mr-2">🔗</span>
+                  Ce produit est un miroir de : {mirrorProductInfo.name}
+                </p>
+                <p className="text-blue-800 text-sm mt-1">
+                  Le stock est géré par le produit principal et ne peut pas être modifié ici.
+                </p>
+              </div>
+            )}
           </div>
 
-          {/* Add Stock Form */}
-          <div className="bg-gray-50 p-4 rounded-lg">
-            <h3 className="text-lg font-medium text-gray-900 mb-4">Ajouter un stock</h3>
-            <div className="flex gap-4">
-              <select
-                value={selectedStockId}
-                onChange={(e) => setSelectedStockId(e.target.value)}
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-md bg-white"
-              >
-                <option value="">Sélectionner un stock</option>
-                {availableStocks.map(stock => (
-                  <option key={stock.id} value={stock.id}>
-                    {stock.name} ({stock.group?.name})
-                  </option>
-                ))}
-              </select>
-              <input
-                type="number"
-                value={quantity}
-                onChange={(e) => setQuantity(parseInt(e.target.value) || 0)}
-                className="w-24 px-3 py-2 border border-gray-300 rounded-md"
-                min="0"
-                placeholder="Qté"
-              />
-              <button
-                onClick={handleAddStock}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-              >
-                <Plus size={18} />
-                Ajouter
-              </button>
-            </div>
-          </div>
+          {!isMirrorProduct && (
+            <>
+              {/* Add Stock Form */}
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <h3 className="text-lg font-medium text-gray-900 mb-4">Ajouter un stock</h3>
+                <div className="flex gap-4">
+                  <select
+                    value={selectedStockId}
+                    onChange={(e) => setSelectedStockId(e.target.value)}
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-md bg-white"
+                  >
+                    <option value="">Sélectionner un stock</option>
+                    {availableStocks.map(stock => (
+                      <option key={stock.id} value={stock.id}>
+                        {stock.name} {stock.group?.name ? `(${stock.group.name})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    value={quantity}
+                    onChange={(e) => setQuantity(parseInt(e.target.value) || 0)}
+                    className="w-24 px-3 py-2 border border-gray-300 rounded-md"
+                    min="0"
+                    placeholder="Qté"
+                  />
+                  <button
+                    onClick={handleAddStock}
+                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                  >
+                    <Plus size={18} />
+                    Ajouter
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
 
           {/* Allocations Table */}
           <div className="bg-white rounded-lg border border-gray-200">
@@ -301,9 +369,11 @@ export const StockManager: React.FC<StockManagerProps> = ({
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Quantité
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Actions
-                  </th>
+                  {!isMirrorProduct && (
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Actions
+                    </th>
+                  )}
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
@@ -316,27 +386,33 @@ export const StockManager: React.FC<StockManagerProps> = ({
                       {allocation.group_name}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      <input
-                        type="number"
-                        value={allocation.quantity}
-                        onChange={(e) => handleUpdateQuantity(allocation.stock_id, parseInt(e.target.value) || 0)}
-                        className="w-24 px-2 py-1 border border-gray-300 rounded-md"
-                        min="0"
-                      />
+                      {isMirrorProduct ? (
+                        allocation.quantity
+                      ) : (
+                        <input
+                          type="number"
+                          value={allocation.quantity}
+                          onChange={(e) => handleUpdateQuantity(allocation.stock_id, parseInt(e.target.value) || 0)}
+                          min="0"
+                          className="w-24 px-2 py-1 border border-gray-300 rounded-md"
+                        />
+                      )}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      <button
-                        onClick={() => handleRemoveStock(allocation.stock_id)}
-                        className="text-red-600 hover:text-red-900"
-                      >
-                        <Trash2 size={18} />
-                      </button>
-                    </td>
+                    {!isMirrorProduct && (
+                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                        <button
+                          onClick={() => handleRemoveStock(allocation.stock_id)}
+                          className="text-red-600 hover:text-red-900"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
                 {allocations.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="px-6 py-4 text-center text-gray-500">
+                    <td colSpan={isMirrorProduct ? 3 : 4} className="px-6 py-4 text-center text-gray-500">
                       Aucun stock alloué
                     </td>
                   </tr>
@@ -354,18 +430,20 @@ export const StockManager: React.FC<StockManagerProps> = ({
                   {totalAllocated} / {globalStock}
                 </p>
               </div>
-              <button
-                onClick={handleSave}
-                disabled={!hasChanges || totalAllocated !== globalStock}
-                className={`flex items-center gap-2 px-4 py-2 rounded-md ${
-                  hasChanges && totalAllocated === globalStock
-                    ? 'bg-blue-600 text-white hover:bg-blue-700'
-                    : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                }`}
-              >
-                <Save size={18} />
-                Valider
-              </button>
+              {!isMirrorProduct && (
+                <button
+                  onClick={handleSave}
+                  disabled={!hasChanges || totalAllocated !== globalStock}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-md ${
+                    hasChanges && totalAllocated === globalStock
+                      ? 'bg-blue-600 text-white hover:bg-blue-700'
+                      : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  }`}
+                >
+                  <Save size={18} />
+                  Valider
+                </button>
+              )}
             </div>
           </div>
         </div>

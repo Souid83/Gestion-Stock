@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { ProductList } from '../components/Products/ProductList';
 import { useProductStore } from '../store/productStore';
+import { useLotStore } from '../store/lotStore';
 import { ProductSearch } from '../components/Search/ProductSearch';
-import { Download } from 'lucide-react';
+import { Download, Upload } from 'lucide-react';
 import Fuse from 'fuse.js';
-import type { Database } from '../types/supabase';
+import { LotCSVImport } from '../components/Lots/LotCSVImport';
+import type { ProductWithStock } from '../types/supabase';
 
-type Product = Database['public']['Tables']['products']['Row'] & {
+type Product = ProductWithStock & {
   category?: {
     type: string;
     brand: string;
@@ -16,12 +18,15 @@ type Product = Database['public']['Tables']['products']['Row'] & {
 
 export const Products: React.FC = () => {
   const { products, fetchProducts } = useProductStore();
+  const { lots, fetchLots } = useLotStore();
   const [filteredProducts, setFilteredProducts] = useState<Product[]>(products);
   const [currentSearchQuery, setCurrentSearchQuery] = useState('');
-
+  const [isLotCSVImportOpen, setIsLotCSVImportOpen] = useState(false);
+    
   useEffect(() => {
     const loadProducts = async () => {
       await fetchProducts();
+      await fetchLots();
       
       // Check for search query and trigger search if needed
       const savedQuery = sessionStorage.getItem('productSearchQuery');
@@ -163,6 +168,8 @@ export const Products: React.FC = () => {
     document.body.removeChild(link);
   };
 
+
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex justify-between items-center">
@@ -182,6 +189,13 @@ export const Products: React.FC = () => {
             <Download size={18} />
             Produits à réapprovisionner
           </button>
+          <button
+            onClick={() => setIsLotCSVImportOpen(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700"
+          >
+            <Upload size={18} />
+            Importer des lots CSV
+          </button>
           <div className="relative flex items-center gap-2">
             <div className="w-96">
               <ProductSearch onSearch={handleSearch} initialQuery={currentSearchQuery} />
@@ -198,7 +212,20 @@ export const Products: React.FC = () => {
           </div>
         </div>
       </div>
-      <ProductList products={filteredProducts} />
+      <ProductList 
+        products={filteredProducts} 
+        lots={lots} 
+      />
+      
+      <LotCSVImport
+        isOpen={isLotCSVImportOpen}
+        onClose={() => setIsLotCSVImportOpen(false)}
+        onImportComplete={() => {
+          setIsLotCSVImportOpen(false);
+          fetchLots();
+        }}
+      />
+      
     </div>
   );
 };
