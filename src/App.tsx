@@ -29,6 +29,7 @@ import { Customers } from './pages/Customers';
 // Import des composants de paramètres
 import { MailSettingsPage } from './components/Billing/MailSettingsPage';
 import { InvoiceSettings } from './components/Billing/InvoiceSettings';
+import { RepairCalculator } from './pages/RepairCalculator';
 
 function App() {
   const { metrics, isLoading, error, fetchMetrics } = useSalesStore();
@@ -36,6 +37,7 @@ function App() {
   const [showProductMenu, setShowProductMenu] = useState(false);
   const [showBillingMenu, setShowBillingMenu] = useState(false);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
+  const [showToolsMenu, setShowToolsMenu] = useState(false);
   const [isAdminUser, setIsAdminUser] = useState(false);
 
   useEffect(() => {
@@ -123,6 +125,8 @@ function App() {
           return <MailSettingsPage />;
         case 'invoice-settings':
           return <InvoiceSettings />;
+        case 'repair-calculator':
+          return <RepairCalculator />;
         default:
           return (
             <main className="container mx-auto px-4 py-6">
@@ -389,10 +393,37 @@ function App() {
             <Cloud size={18} />
             <span>Cloud</span>
           </a>
-          <a href="#" className="px-4 py-2 flex items-center space-x-3 text-gray-300 hover:bg-[#24303a]">
-            <Tool size={18} />
-            <span>Outils</span>
-          </a>
+          
+          {/* Tools Menu with Submenu */}
+          <div className="relative">
+            <a
+              href="#"
+              onClick={() => setShowToolsMenu(!showToolsMenu)}
+              className={`px-4 py-2 flex items-center justify-between text-gray-300 hover:bg-[#24303a] ${
+                currentPage.includes('repair-calculator') ? 'bg-[#24303a]' : ''
+              }`}
+            >
+              <div className="flex items-center space-x-3">
+                <Tool size={18} />
+                <span>Outils</span>
+              </div>
+              <span className={`transform transition-transform ${showToolsMenu ? 'rotate-180' : ''}`}>
+                ▼
+              </span>
+            </a>
+            
+            {showToolsMenu && (
+              <div className="bg-[#24303a] py-2">
+                <a
+                  href="#"
+                  onClick={() => setCurrentPage('repair-calculator')}
+                  className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
+                >
+                  Aides Prix & Fiches Marketing
+                </a>
+              </div>
+            )}
+          </div>
           
           {/* Settings Menu with Submenu */}
           <div className="relative">
