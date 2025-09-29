@@ -565,6 +565,14 @@ export const RepairCalculator: React.FC = () => {
     const redMax = thresholds.redMax ?? 0;
     const greenMin = thresholds.greenMin ?? 0;
 
+    // Pour % valeur produit: bicolore (vert entre min et max, rouge en dehors)
+    if (kind === 'valuePct') {
+      if (value < redMax) return 'text-red-600 font-bold';
+      if (value > greenMin) return 'text-red-600 font-bold';
+      return 'text-green-600 font-bold';
+    }
+
+    // Pour Marge nette %, on conserve la logique existante (tri-couleur)
     if (value <= redMax) return 'text-red-600 font-bold';
     if (value < greenMin) return 'text-yellow-600 font-bold';
     return 'text-green-600 font-bold';
@@ -1116,54 +1124,88 @@ return updatedPart;
         {/* Seuils % valeur produit */}
 <div className="mt-6">
   <p className="text-sm font-medium text-gray-700 mb-2">Seuils % valeur produit</p>
-  <div className="rounded-md border border-gray-200 overflow-hidden">
-    <table className="w-full table-fixed text-center text-sm">
-      <thead className="bg-gray-100">
-        <tr>
-          <th className="py-2">🔴 Rouge</th>
-          <th className="py-2">🟡 Jaune</th>
-          <th className="py-2">🟢 Vert</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr className="bg-gray-50">
-          <td className="py-2">
-            ≤{' '}
-            <input
-              type="number"
-              className="w-20 text-center h-10 font-bold rounded-md border-gray-300 bg-white shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm"
-              value={globalSettings.valuePctThresholds.redMax}
-              onChange={(e) =>
-                handleThresholdChange('valuePct', 'redMax', parseFloat(e.target.value) || 0)
-              }
-            />{' '}
-            %
-          </td>
-          <td className="py-2">
-            Entre{' '}
-            <span className="font-bold">
-              {(globalSettings.valuePctThresholds.redMax ?? 0) + 1}%
-            </span>{' '}
-            et{' '}
-            <span className="font-bold">
-              {(globalSettings.valuePctThresholds.greenMin ?? 0) - 1}%
-            </span>
-          </td>
-          <td className="py-2">
-            ≥{' '}
-            <input
-              type="number"
-              className="w-20 text-center h-10 font-bold rounded-md border-gray-300 bg-white shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm"
-              value={globalSettings.valuePctThresholds.greenMin}
-              onChange={(e) =>
-                handleThresholdChange('valuePct', 'greenMin', parseFloat(e.target.value) || 0)
-              }
-            />{' '}
-            %
-          </td>
-        </tr>
-      </tbody>
-    </table>
+  <div className="p-4 bg-gray-50 rounded-md border border-gray-200">
+    <div className="space-y-4">
+      {/* Slider Min (Rouge) */}
+      <div className="flex items-center gap-4">
+        <span className="text-red-600 font-bold w-16 text-right">Min</span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={globalSettings.valuePctThresholds.redMax}
+          onChange={(e) => {
+            const raw = parseInt(e.target.value) || 0;
+            const val = Math.min(100, Math.max(0, raw));
+            // Forcer min ≤ max: si min dépasse max, ajuster max
+            if (val > globalSettings.valuePctThresholds.greenMin) {
+              handleThresholdChange('valuePct', 'greenMin', val);
+            }
+            handleThresholdChange('valuePct', 'redMax', val);
+          }}
+          className="flex-1 accent-red-600"
+          aria-label="Seuil minimum valeur produit"
+        />
+        <input
+          type="number"
+          min={0}
+          max={100}
+          className="w-20 h-10 text-center rounded-md border-gray-300 bg-white shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm"
+          value={globalSettings.valuePctThresholds.redMax}
+          onChange={(e) => {
+            const raw = parseFloat(e.target.value) || 0;
+            const val = Math.min(100, Math.max(0, raw));
+            if (val > globalSettings.valuePctThresholds.greenMin) {
+              handleThresholdChange('valuePct', 'greenMin', val);
+            }
+            handleThresholdChange('valuePct', 'redMax', val);
+          }}
+        />
+        <span className="text-gray-500 text-sm">%</span>
+      </div>
+
+      {/* Slider Max (Vert) */}
+      <div className="flex items-center gap-4">
+        <span className="text-green-600 font-bold w-16 text-right">Max</span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={globalSettings.valuePctThresholds.greenMin}
+          onChange={(e) => {
+            const raw = parseInt(e.target.value) || 0;
+            const val = Math.min(100, Math.max(0, raw));
+            // Forcer min ≤ max: si max passe sous min, ajuster min
+            if (val < globalSettings.valuePctThresholds.redMax) {
+              handleThresholdChange('valuePct', 'redMax', val);
+            }
+            handleThresholdChange('valuePct', 'greenMin', val);
+          }}
+          className="flex-1 accent-green-600"
+          aria-label="Seuil maximum valeur produit"
+        />
+        <input
+          type="number"
+          min={0}
+          max={100}
+          className="w-20 h-10 text-center rounded-md border-gray-300 bg-white shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm"
+          value={globalSettings.valuePctThresholds.greenMin}
+          onChange={(e) => {
+            const raw = parseFloat(e.target.value) || 0;
+            const val = Math.min(100, Math.max(0, raw));
+            if (val < globalSettings.valuePctThresholds.redMax) {
+              handleThresholdChange('valuePct', 'redMax', val);
+            }
+            handleThresholdChange('valuePct', 'greenMin', val);
+          }}
+        />
+        <span className="text-gray-500 text-sm">%</span>
+      </div>
+    </div>
+
+    <p className="mt-2 text-xs text-gray-500 text-center">
+      Vert entre {globalSettings.valuePctThresholds.redMax}% et {globalSettings.valuePctThresholds.greenMin}% • Rouge en dehors
+    </p>
   </div>
 </div>
 
