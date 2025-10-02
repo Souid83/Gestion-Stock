@@ -55,11 +55,54 @@ export const RepairCalculator: React.FC = () => {
   const [modifiedParts, setModifiedParts] = useState<Set<string>>(new Set());
   const [savedParts, setSavedParts] = useState<Set<string>>(new Set());
   const [isLoadingArticles, setIsLoadingArticles] = useState(false);
-  const [isGlobalExpanded, setIsGlobalExpanded] = useState(true);
+  const [isGlobalExpanded, setIsGlobalExpanded] = useState(false);
   const [isGlobalModified, setIsGlobalModified] = useState(false);
   const [isGlobalSaved, setIsGlobalSaved] = useState(false);
   const [existingModels, setExistingModels] = useState<string[]>([]);
   const [existingParts, setExistingParts] = useState<string[]>([]);
+
+  // Ordre explicite pour l'affichage et l'export
+  const IPHONE_ORDER = [
+    'iPhone 8',
+    'iPhone 8 Plus',
+    'iPhone X',
+    'iPhone XR',
+    'iPhone XS',
+    'iPhone XS Max',
+    'iPhone 11',
+    'iPhone 11 Pro',
+    'iPhone 11 Pro Max',
+    'iPhone 12',
+    'iPhone 12 Mini',
+    'iPhone 12 Pro',
+    'iPhone 12 Pro Max',
+    'iPhone 13',
+    'iPhone 13 Mini',
+    'iPhone 13 Pro',
+    'iPhone 13 Pro Max',
+    'iPhone 14',
+    'iPhone 14 Plus',
+    'iPhone 14 Pro',
+    'iPhone 14 Pro Max',
+    'iPhone 15',
+    'iPhone 15 Plus',
+    'iPhone 15 Pro',
+    'iPhone 15 Pro Max',
+    'iPhone 16',
+    'iPhone 16 Plus',
+    'iPhone 16 Pro',
+    'iPhone 16 Pro Max',
+    'iPhone 17',
+    'iPhone Air',
+    'iPhone 17 Pro',
+    'iPhone 17 Pro Max',
+  ];
+
+  const orderIndex = (name: string): number => {
+    const n = String(name || '').trim().toLowerCase();
+    const idx = IPHONE_ORDER.findIndex(x => x.toLowerCase() === n);
+    return idx >= 0 ? idx : 10000; // Non listé -> après tous les iPhone
+  };
 
   // Fonction utilitaire pour calculer le prix de réparation HT nécessaire pour atteindre une marge nette cible
   const calculateRepairPriceForTargetNetMargin = (
@@ -180,15 +223,24 @@ export const RepairCalculator: React.FC = () => {
         console.log(`Services loaded for model ${model.id}:`, servicesData);
         
         // Mapper les services en objets Part
-        const parts: Part[] = (servicesData || []).map((service: any) => ({
-          id: service.id,
-          name: service.name || '',
-          serviceTime: service.service_time || 0,
-          repairPrice: service.repair_price || 0,
-          valuePercentage: service.value_percentage || 0,
-          purchasePrice: service.purchase_price || 0,
-          targetNetMargin: service.target_net_margin || 0
-        }));
+        const modelValue = Number(model.value) || 0;
+        const parts: Part[] = (servicesData || []).map((service: any) => {
+          const repairPrice = Number(service.repair_price) || 0;
+          const fallbackPct = Number(service.value_percentage) || 0;
+          const valuePercentage = modelValue > 0 && repairPrice > 0
+            ? (repairPrice / modelValue) * 100
+            : fallbackPct;
+
+          return {
+            id: service.id,
+            name: service.name || '',
+            serviceTime: Number(service.service_time) || 0,
+            repairPrice,
+            valuePercentage,
+            purchasePrice: Number(service.purchase_price) || 0,
+            targetNetMargin: Number(service.target_net_margin) || 0
+          };
+        });
         
         // Construire l'objet Article
         const article: Article = {
@@ -197,7 +249,7 @@ export const RepairCalculator: React.FC = () => {
           value: model.value || 0,
           parts: parts,
           selected: false,
-          isExpanded: true,
+          isExpanded: false,
           isModified: false,
           isSaved: false
         };
@@ -206,6 +258,12 @@ export const RepairCalculator: React.FC = () => {
       }
       
       console.log('All articles loaded:', loadedArticles);
+      loadedArticles.sort((a, b) => {
+        const ia = orderIndex(a.name);
+        const ib = orderIndex(b.name);
+        if (ia !== ib) return ia - ib;
+        return String(a.name || '').localeCompare(String(b.name || ''), 'fr');
+      });
       setArticles(loadedArticles);
     } catch (err) {
       console.error('Error loading articles:', err);
@@ -358,7 +416,7 @@ export const RepairCalculator: React.FC = () => {
   
           const { data: model, error: mErr } = await (supabase as any)
             .from('repair_models')
-            .select('id')
+            .select('id, value')
             .eq('name', modelName)
             .maybeSingle();
           if (mErr) throw mErr;
@@ -367,12 +425,19 @@ export const RepairCalculator: React.FC = () => {
             continue;
           }
   
+          const repairPriceNum = Number(r.repair_price) || 0;
+          const modelValueNum = Number(model.value) || 0;
+          const valuePct = modelValueNum > 0 && repairPriceNum > 0
+            ? (repairPriceNum / modelValueNum) * 100
+            : 0;
+
           payload.push({
             repair_model_id: model.id,
             name: serviceName,
             service_time: Number(r.service_time) || 0,
-            repair_price: Number(r.repair_price) || 0,
-            purchase_price: Number(r.purchase_price) || 0
+            repair_price: repairPriceNum,
+            purchase_price: Number(r.purchase_price) || 0,
+            value_percentage: Number(valuePct.toFixed(2))
           });
         }
   
@@ -411,18 +476,34 @@ export const RepairCalculator: React.FC = () => {
 
       const { data: services, error: sErr } = await (supabase as any)
         .from('repair_services')
-        .select('id, repair_model_id, name, service_time, repair_price, value_percentage, purchase_price');
+        .select('id, repair_model_id, name, service_time, repair_price, value_percentage, purchase_price, target_net_margin');
       if (sErr) throw sErr;
 
-      const header = 'dataset,repair_model_id,name,value,service_time,repair_price,value_percentage,purchase_price\n';
+      const header = 'dataset,name,value,service_time,repair_price,value_percentage,purchase_price,net_margin\n';
       const lines: string[] = [];
 
-      (models || []).forEach((m: any) => {
-        lines.push(`model,${m.id ?? ''},${m.name ?? ''},${m.value ?? ''},,,,`);
+      // Sort models with explicit order (iPhone 8 -> iPhone 17 Pro Max), others after alphabetically
+      const sortedModels = [...(models || [])].sort((a: any, b: any) => {
+        const ia = orderIndex(a.name);
+        const ib = orderIndex(b.name);
+        if (ia !== ib) return ia - ib;
+        return String(a.name || '').localeCompare(String(b.name || ''), 'fr');
       });
 
-      (services || []).forEach((s: any) => {
-        lines.push(`service,${s.repair_model_id ?? ''},${s.name ?? ''},,${s.service_time ?? ''},${s.repair_price ?? ''},${s.value_percentage ?? ''},${s.purchase_price ?? ''}`);
+      sortedModels.forEach((m: any) => {
+        // Parent line for model: dataset,name,value then empty columns for service fields
+        lines.push(`model,${m.name ?? ''},${m.value ?? ''},,,,,`);
+        const children = (services || []).filter((s: any) => s.repair_model_id === m.id);
+        children.forEach((s: any) => {
+          const rp = Number(s.repair_price) || 0;
+          const pp = Number(s.purchase_price) || 0;
+          const st = Number(s.service_time) || 0;
+          const tnm = Number(s.target_net_margin) || 0;
+          const margins = calculateMargins({ repairPrice: rp, purchasePrice: pp, serviceTime: st, targetNetMargin: tnm } as any, Number(m.value) || 0);
+          const net = Number(margins.netMarginEur || 0).toFixed(2);
+          // Child service line: dataset,name,,service_time,repair_price,value_percentage,purchase_price,net_margin
+          lines.push(`service,${s.name ?? ''},,${s.service_time ?? ''},${s.repair_price ?? ''},${s.value_percentage ?? ''},${s.purchase_price ?? ''},${net}`);
+        });
       });
 
       downloadText('repair_data_export.csv', header + lines.join('\n'));
@@ -580,6 +661,27 @@ export const RepairCalculator: React.FC = () => {
 
   const handleArticleChange = (articleId: string, field: keyof Article, value: any) => {
     console.log(`Article ${articleId} field ${field} changed to:`, value);
+
+    if (field === 'value') {
+      setArticles(prev =>
+        prev.map(a =>
+          a.id === articleId
+            ? {
+                ...a,
+                value: value,
+                isModified: true,
+                isSaved: false,
+                parts: a.parts.map(p => {
+                  const pct = value > 0 && p.repairPrice > 0 ? (p.repairPrice / value) * 100 : 0;
+                  return { ...p, valuePercentage: pct };
+                })
+              }
+            : a
+        )
+      );
+      return;
+    }
+
     setArticles(prev => prev.map(article => 
       article.id === articleId ? { ...article, [field]: value, isModified: true, isSaved: false } : article
     ));
@@ -740,7 +842,7 @@ return updatedPart;
       name: '',
       value: 0,
       selected: false,
-      isExpanded: true,
+      isExpanded: false,
       isModified: false,
       isSaved: false,
       parts: []
@@ -920,12 +1022,17 @@ return updatedPart;
       console.log(`Saving part ${partId} to repair_services`);
       
       // Construire le payload pour l'upsert
+      const modelValueNum = Number(targetArticle.value) || 0;
+      const repairPriceNum = Number(targetPart.repairPrice) || 0;
+      const valuePct = modelValueNum > 0 && repairPriceNum > 0
+        ? (repairPriceNum / modelValueNum) * 100
+        : 0;
       const payload: any = {
         repair_model_id: targetArticle.id,
         name: targetPart.name,
         service_time: targetPart.serviceTime,
-        repair_price: targetPart.repairPrice,
-        value_percentage: targetPart.valuePercentage,
+        repair_price: repairPriceNum,
+        value_percentage: Number(valuePct.toFixed(2)),
         purchase_price: targetPart.purchasePrice,
         target_net_margin: targetPart.targetNetMargin
       };

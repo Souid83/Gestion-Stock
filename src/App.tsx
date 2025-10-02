@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Package, Bell, DollarSign, Settings, Users, ShoppingBag, Cloud, PenTool as Tool, Box, Layers } from 'lucide-react';
+import { Package, Bell, DollarSign, Settings, Users, ShoppingBag, Cloud, PenTool as Tool, Box, Layers, Wrench, Calculator } from 'lucide-react';
 import { useSalesStore } from './store/salesStore';
 import { Products } from './pages/Products';
 import { ProductForm } from './components/Products/ProductForm';
@@ -30,6 +30,7 @@ import { Customers } from './pages/Customers';
 import { MailSettingsPage } from './components/Billing/MailSettingsPage';
 import { InvoiceSettings } from './components/Billing/InvoiceSettings';
 import { RepairCalculator } from './pages/RepairCalculator';
+import { PriseEnCharge } from './pages/PriseEnCharge';
 
 function App() {
   const { metrics, isLoading, error, fetchMetrics } = useSalesStore();
@@ -38,6 +39,8 @@ function App() {
   const [showBillingMenu, setShowBillingMenu] = useState(false);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [showToolsMenu, setShowToolsMenu] = useState(false);
+  const [showWorkshopMenu, setShowWorkshopMenu] = useState(false);
+  const [isQuickCalcOpen, setIsQuickCalcOpen] = useState(false);
   const [isAdminUser, setIsAdminUser] = useState(false);
 
   useEffect(() => {
@@ -127,6 +130,8 @@ function App() {
           return <InvoiceSettings />;
         case 'repair-calculator':
           return <RepairCalculator />;
+        case 'atelier-prise-en-charge':
+          return <PriseEnCharge />;
         default:
           return (
             <main className="container mx-auto px-4 py-6">
@@ -307,6 +312,37 @@ function App() {
             )}
           </div>
           
+          {/* Workshop Menu with Submenu */}
+          <div className="relative">
+            <a
+              href="#"
+              onClick={() => setShowWorkshopMenu(!showWorkshopMenu)}
+              className={`px-4 py-2 flex items-center justify-between text-gray-300 hover:bg-[#24303a] ${
+                currentPage.includes('atelier') ? 'bg-[#24303a]' : ''
+              }`}
+            >
+              <div className="flex items-center space-x-3">
+                <Wrench size={18} />
+                <span>Atelier</span>
+              </div>
+              <span className={`transform transition-transform ${showWorkshopMenu ? 'rotate-180' : ''}`}>
+                ▼
+              </span>
+            </a>
+            
+            {showWorkshopMenu && (
+              <div className="bg-[#24303a] py-2">
+                <a
+                  href="#"
+                  onClick={() => setCurrentPage('atelier-prise-en-charge')}
+                  className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
+                >
+                  Prise en charge
+                </a>
+              </div>
+            )}
+          </div>
+
           {/* Billing Menu with Submenu */}
           <div className="relative">
             <a
@@ -367,14 +403,6 @@ function App() {
           >
             <ShoppingBag size={18} />
             <span>Commandes</span>
-          </a>
-          <a 
-            href="#" 
-            onClick={() => setCurrentPage('invoices-list')}
-            className={`px-4 py-2 flex items-center space-x-3 text-gray-300 hover:bg-[#24303a] ${currentPage === 'invoices-list' ? 'bg-[#24303a]' : ''}`}
-          >
-            <DollarSign size={18} />
-            <span>Factures</span>
           </a>
           <a 
             href="#" 
@@ -473,6 +501,15 @@ function App() {
             <div className="flex items-center justify-between">
               <h1 className="text-xl font-semibold">InterfaceV2</h1>
               <div className="flex items-center space-x-4">
+                <button
+                  type="button"
+                  onClick={() => setIsQuickCalcOpen(prev => !prev)}
+                  aria-label="Calculette"
+                  className={isQuickCalcOpen ? 'text-blue-500' : 'text-gray-300 hover:text-blue-500'}
+                  title="Calculette rapide"
+                >
+                  <Calculator size={18} />
+                </button>
                 <span className="flex items-center">
                   <Bell size={18} className="mr-2" />
                   <span className="bg-red-500 text-white px-2 py-0.5 rounded text-sm">1 Urgence</span>
@@ -487,6 +524,24 @@ function App() {
         <div className="flex-1 min-h-0 overflow-hidden">
           {renderContent()}
         </div>
+
+        {isQuickCalcOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div className="absolute inset-0 bg-black/50" />
+            <div className="relative bg-white rounded shadow-lg w-full max-w-sm p-4">
+              <h3 className="text-lg font-semibold mb-3">Calculette rapide</h3>
+              <div className="text-sm text-gray-500 mb-4">Contenu à venir…</div>
+              <div className="flex justify-end">
+                <button
+                  onClick={() => setIsQuickCalcOpen(false)}
+                  className="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700"
+                >
+                  Fermer
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
