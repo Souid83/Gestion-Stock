@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Style number input spinners */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  opacity: 1;
+  background: #f0f9ff;
+  height: 1.75em;
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-left: 1px solid #e5e7eb;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  margin: 0;
+}
+
+/* Hide default arrows in Firefox */
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Reset Firefox specific styles */
+input[type="number"]::-moz-number-spin-up,
+input[type="number"]::-moz-number-spin-down {
+  -moz-appearance: none;
+  background: #f0f9ff;
+  border-left: 1px solid #e5e7eb;
+  height: 50%;
+  position: absolute;
+  right: 8px;
+  cursor: pointer;
+}
