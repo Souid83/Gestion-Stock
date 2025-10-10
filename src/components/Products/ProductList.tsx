@@ -8,6 +8,7 @@ import { StockManager } from './StockManager';
 import { SerialProductFormModal } from './SerialProductFormModal';
 import { EditSerialProductForm } from './EditSerialProductForm';
 import { MirrorProductModal } from './MirrorProductModal';
+import { MirrorChildEditModal } from './MirrorChildEditModal';
 import { LotModal } from '../Lots/LotModal';
 import { supabase } from '../../lib/supabase';
 import type { ProductWithStock } from '../../types/supabase';
@@ -70,6 +71,8 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
   // État pour l'édition d'un produit enfant (numéro de série)
   const [editingSerialProduct, setEditingSerialProduct] = useState<Product | null>(null);
   const [showSerialProductFormModal, setShowSerialProductFormModal] = useState(false);
+  const [showMirrorChildEditModal, setShowMirrorChildEditModal] = useState(false);
+  const [mirrorChildToEdit, setMirrorChildToEdit] = useState<any | null>(null);
   const [stocks, setStocks] = useState<any[]>([]);
   // États pour les produits miroirs
   const [showMirrorModal, setShowMirrorModal] = useState(false);
@@ -78,7 +81,18 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
   const [selectedProduct, setSelectedProduct] = useState<ProductWithStock | null>(null);
   const [editingLotId, setEditingLotId] = useState<string | null>(null);
   const [expandedLots, setExpandedLots] = useState<Set<string>>(new Set());
+  const [lotStats, setLotStats] = useState<Record<string, { available: number; unitsPerLot: number; costHT: number }>>({});
+  const [lotExtrasById, setLotExtrasById] = useState<Record<string, {
+    name: string;
+    sku: string;
+    stock_alert: number | null;
+    location: string | null;
+    margin_pro_percent: number | null;
+    margin_retail_percent: number | null;
+    quantity_per_lot: number | null;
+  }>>({});
   const [typeFilter, setTypeFilter] = useState<'ALL' | 'PAU' | 'PAM'>('ALL');
+  const [stockChangeTick, setStockChangeTick] = useState(0);
 
   // Filtrer les produits pour n'afficher que les parents (sans parent_id)
   // Charger la liste des stocks pour le modal
@@ -121,6 +135,7 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
             // Afficher parents et miroirs (exclure les sérialisés)
             const listProducts = updatedProducts.filter(p => !p.serial_number);
             setProducts(listProducts as any);
+            setStockChangeTick(t => t + 1);
           }
         }
       )
@@ -130,6 +145,181 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
       supabase.removeChannel(subscription);
     };
   }, [fetchProducts]);
+
+  // Calculer les stats des lots (disponibilité et coût) en fonction des stocks des composants
+  useEffect(() => {
+    const computeLotStats = async () => {
+      try {
+        const lotList = lots || [];
+        if (lotList.length === 0) {
+          setLotStats({});
+          return;
+        }
+
+        // Construire une map des composants par lot, même si la vue ne fournit pas "components"
+        const componentsByLot: Record<string, Array<{ product_id: string; quantity: number }>> = {};
+        const missingLotIds: string[] = [];
+        for (const l of lotList as any[]) {
+          const lotId = (l as any).id ?? (l as any).lot_id;
+          const comps = Array.isArray((l as any).components) ? (l as any).components : [];
+          if (comps.length > 0) {
+            componentsByLot[lotId] = comps.map((c: any) => ({ product_id: c.product_id, quantity: Number(c.quantity ?? 1) }));
+          } else {
+            missingLotIds.push(lotId);
+          }
+        }
+
+        // Fallback: récupérer les composants manquants depuis lot_components
+        if (missingLotIds.length > 0) {
+          const { data: lcRows, error: lcErr } = await supabase
+            .from('lot_components')
+            .select('lot_id, product_id, quantity')
+            .in('lot_id', missingLotIds as any);
+          if (!lcErr && Array.isArray(lcRows)) {
+            lcRows.forEach((r: any) => {
+              if (!componentsByLot[r.lot_id]) componentsByLot[r.lot_id] = [];
+              componentsByLot[r.lot_id].push({ product_id: r.product_id, quantity: Number(r.quantity ?? 1) });
+            });
+          }
+        }
+
+        // Dernier fallback si aucun composant n'a pu être résolu: utiliser product_id + quantity_per_lot
+        lotList.forEach((l: any) => {
+          const lotId2 = (l as any).id ?? (l as any).lot_id;
+          const hasComps = Array.isArray(componentsByLot[lotId2]) && componentsByLot[lotId2].length > 0;
+          const parentPid = (l as any).product_id;
+          if (!hasComps && parentPid) {
+            const qty = Number((lotExtrasById[lotId2]?.quantity_per_lot ?? (l as any).quantity_per_lot ?? 1));
+            componentsByLot[lotId2] = [{ product_id: parentPid, quantity: qty }];
+          }
+        });
+
+        // Collecter tous les product_id impliqués
+        const productIds = Array.from(
+          new Set(
+            Object.values(componentsByLot)
+              .flat()
+              .map((c) => c.product_id)
+              .filter(Boolean)
+          )
+        );
+        if (productIds.length === 0) {
+          setLotStats({});
+          return;
+        }
+
+        // Charger les stocks (agrégés cross-dépôts) et coûts des produits composants
+        const [{ data: stockRows }, { data: productRows }] = await Promise.all([
+          supabase
+            .from('stock_produit')
+            .select('produit_id, quantite')
+            .in('produit_id', productIds as any),
+          supabase
+            .from('products')
+            .select('id, purchase_price_with_fees')
+            .in('id', productIds as any),
+        ]);
+
+        const stockByProduct: Record<string, number> = {};
+        (stockRows || []).forEach((r: any) => {
+          const pid = r.produit_id;
+          stockByProduct[pid] = (stockByProduct[pid] || 0) + (r.quantite || 0);
+        });
+
+        // Fallback: si aucun stock_produit n'est trouvé (multi-dépôts non utilisés) mais stock partagé actif,
+        // compléter depuis la vue products_with_stock (shared_quantity)
+        try {
+          const missingIds = productIds.filter((id) => (stockByProduct[id] ?? 0) === 0);
+          if (missingIds.length > 0) {
+            const { data: vwRows } = await supabase
+              .from('products_with_stock')
+              .select('id, shared_quantity')
+              .in('id', missingIds as any);
+            (vwRows || []).forEach((v: any) => {
+              if (typeof v.shared_quantity === 'number' && v.shared_quantity > 0) {
+                stockByProduct[v.id] = (stockByProduct[v.id] || 0) + v.shared_quantity;
+              }
+            });
+          }
+        } catch (e) {
+          console.warn('Fallback products_with_stock failed:', e);
+        }
+
+        const priceByProduct: Record<string, number> = {};
+        (productRows || []).forEach((p: any) => {
+          priceByProduct[p.id] = p.purchase_price_with_fees || 0;
+        });
+
+        // Calculer les stats par lot
+        const next: Record<string, { available: number; unitsPerLot: number; costHT: number }> = {};
+        lotList.forEach((l: any) => {
+          const lotId = (l as any).id ?? (l as any).lot_id;
+          const comps = componentsByLot[lotId] || [];
+          if (comps.length === 0) {
+            next[lotId] = { available: (l.stock ?? 0), unitsPerLot: Number((l.quantity_per_lot ?? 0)), costHT: (l.purchase_price_ht ?? 0) };
+            return;
+          }
+          let minLots = Number.POSITIVE_INFINITY;
+          let unitsPerLot = 0;
+          let costHT = 0;
+          comps.forEach((c) => {
+            const qty = Number(c.quantity ?? 1);
+            const compStock = stockByProduct[c.product_id] || 0;
+            const compLots = Math.floor(compStock / qty);
+            minLots = Math.min(minLots, isFinite(compLots) ? compLots : 0);
+            unitsPerLot += qty;
+            costHT += (priceByProduct[c.product_id] || 0) * qty;
+          });
+          if (!isFinite(minLots)) minLots = 0;
+          next[lotId] = { available: Math.max(0, minLots), unitsPerLot, costHT };
+        });
+
+        setLotStats(next);
+      } catch (e) {
+        console.error('Error computing lot stats:', e);
+      }
+    };
+
+    computeLotStats();
+  }, [lots, lotExtrasById, stockChangeTick]);
+
+  // Charger les métadonnées exactes des lots depuis la table 'lots'
+  // (name, sku, marges, alerte, emplacement, quantity_per_lot)
+  useEffect(() => {
+    const loadLotExtras = async () => {
+      try {
+        const lotIds = (lots || []).map((l: any) => (l.id ?? l.lot_id)).filter(Boolean);
+        if (lotIds.length === 0) {
+          setLotExtrasById({});
+          return;
+        }
+        const { data, error } = await supabase
+          .from('lots')
+          .select('id, name, sku, stock_alert, location, margin_pro_percent, margin_retail_percent, quantity_per_lot')
+          .in('id', lotIds as any);
+        if (!error && Array.isArray(data)) {
+          const map = Object.fromEntries(
+            (data as any[]).map((r: any) => [
+              r.id,
+              {
+                name: r.name,
+                sku: r.sku,
+                stock_alert: r.stock_alert,
+                location: r.location,
+                margin_pro_percent: r.margin_pro_percent,
+                margin_retail_percent: r.margin_retail_percent,
+                quantity_per_lot: r.quantity_per_lot
+              }
+            ])
+          );
+          setLotExtrasById(map);
+        }
+      } catch (e) {
+        console.error('Error loading lot extras:', e);
+      }
+    };
+    loadLotExtras();
+  }, [lots]);
 
   // Vérifier quels produits ont des enfants et précharger ces enfants
   useEffect(() => {
@@ -181,6 +371,42 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
     checkForChildProducts();
   }, [products]);
 
+  // Preload parent data for mirror children to compute parent-driven stock display
+  useEffect(() => {
+    const preloadParents = async () => {
+      try {
+        const mirrors = products.filter((p: any) => p.parent_id && !p.serial_number);
+        const parentIds = Array.from(new Set(mirrors.map((m: any) => m.parent_id).filter(Boolean)));
+        if (parentIds.length === 0) return;
+        const { data, error } = await supabase
+          .from('products')
+          .select(`
+            *,
+            stocks:stock_produit (
+              quantite,
+              stock:stocks (
+                name
+              )
+            )
+          `)
+          .in('id', parentIds as any);
+        if (!error && data) {
+          setParentForMirror(prev => {
+            const next: Record<string, any> = { ...prev };
+            mirrors.forEach((m: any) => {
+              const parent = (data as any[]).find((d: any) => d.id === m.parent_id);
+              if (parent) next[m.id] = parent;
+            });
+            return next as any;
+          });
+        }
+      } catch (e) {
+        console.error('Error preloading mirror parents:', e);
+      }
+    };
+    preloadParents();
+  }, [products]);
+
   const calculateTTC = (priceHT: number) => {
     return priceHT * (1 + TVA_RATE);
   };
@@ -227,6 +453,7 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
       // Afficher parents et miroirs (exclure les sérialisés)
       const listProducts = updatedProducts.filter(p => !p.serial_number);
       setProducts(listProducts as any);
+      setStockChangeTick(t => t + 1);
     }
   };
 
@@ -278,8 +505,8 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
   };
 
   const canCreateLot = (product: Product): boolean => {
-    // Lots uniquement pour produits à prix d'achat unique (PAU)
-    return !product.parent_id && product.product_type === 'PAU';
+    // Lots autorisés pour parents PAU et PAM (pas pour enfants/miroirs)
+    return !product.parent_id && (product.product_type === 'PAU' || product.product_type === 'PAM');
   };
 
   const handleCreateLot = (product: Product) => {
@@ -355,9 +582,9 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
   const allItems = [
     ...displayedProducts.map(p => ({ ...p, itemType: 'product' as const })),
     ...lots.map(l => {
-      // Independent margins for lots:
-      // - Compute retail (magasin) from margin_retail_percent if present, otherwise derive from DB values
-      // - Compute pro from margin_pro_percent if present, otherwise fall back to retail percent
+      // Valorisation et disponibilité calculées dynamiquement depuis lotStats
+      const lotId = (l as any).id ?? (l as any).lot_id;
+      const extra = lotExtrasById[lotId];
       const base = l.purchase_price_ht || 0;
       const derivedRetailPct =
         base > 0
@@ -365,37 +592,44 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
               ? ((l.selling_price_ht - base) / base) * 100
               : 0)
           : 0;
-      const retailPct = (l as any).margin_retail_percent ?? derivedRetailPct;
-      const proPct = (l as any).margin_pro_percent ?? retailPct;
+      const retailPct = (extra?.margin_retail_percent ?? (l as any).margin_retail_percent ?? derivedRetailPct);
+      const proPct = (extra?.margin_pro_percent ?? (l as any).margin_pro_percent ?? retailPct);
+
+      const stat = lotStats[lotId] || { available: l.stock || 0, unitsPerLot: (l as any).quantity_per_lot ?? null, costHT: base };
+      const costHT = (stat.costHT ?? base ?? l.purchase_price_ht ?? 0);
 
       const retailPrice = l.vat_type === 'margin'
-        ? base + (base * (retailPct / 100)) * 1.2 // TVM when VAT on margin
-        : base + base * (retailPct / 100);        // HT when normal VAT
+        ? costHT + (costHT * (retailPct / 100)) * 1.2 // TVM when VAT on margin
+        : costHT + costHT * (retailPct / 100);        // HT when normal VAT
       const proPrice = l.vat_type === 'margin'
-        ? base + (base * (proPct / 100)) * 1.2    // TVM when VAT on margin
-        : base + base * (proPct / 100);           // HT when normal VAT
+        ? costHT + (costHT * (proPct / 100)) * 1.2    // TVM when VAT on margin
+        : costHT + costHT * (proPct / 100);           // HT when normal VAT
+
+      // Extras du lot depuis la table 'lots' (fallback si la vue est partielle)
+      const name = extra?.name ?? l.name;
+      const sku = extra?.sku ?? l.sku;
+      const stockAlert = extra?.stock_alert ?? l.stock_alert;
+      const location = extra?.location ?? l.location;
 
       return {
         ...l,
         itemType: 'lot' as const,
-        // Map lot fields to product-like structure for consistent display
-        id: l.id,
-        name: l.name,
-        sku: l.sku,
-        purchase_price_with_fees: base,
-        // Use computed prices so pro/retail can differ
+        id: lotId,
+        name: name,
+        sku: sku,
+        purchase_price_with_fees: costHT,
         retail_price: retailPrice,
         pro_price: proPrice,
-        stock: l.stock,
-        stock_alert: l.stock_alert,
-        location: l.location,
+        stock: (typeof stat.available === 'number' ? stat.available : (l.stock ?? 0)),
+        stock_alert: stockAlert,
+        location: location,
         vat_type: l.vat_type,
-        // Display percents corresponding to each price
         margin_percent: retailPct,
         pro_margin_percent: proPct,
         is_parent: false,
         serial_number: null,
-        mirror_of: null
+        mirror_of: null,
+        lot_units_per_lot: (stat.unitsPerLot ?? extra?.quantity_per_lot ?? (l as any).quantity_per_lot ?? null)
       };
     })
   ];
@@ -412,18 +646,6 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
     <div className="relative flex flex-col h-screen overflow-hidden">
       <div className="bg-white rounded-lg shadow flex-1 flex min-h-0">
         <div className="relative min-h-0 overflow-x-auto overflow-y-auto overscroll-contain h-[calc(100vh-220px)]">
-          <div className="px-4 py-3 border-b border-gray-200 bg-white flex items-center gap-3">
-            <label className="text-sm text-gray-600">Filtrer par type:</label>
-            <select
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value as 'ALL' | 'PAU' | 'PAM')}
-              className="px-2 py-1 border border-gray-300 rounded-md text-sm bg-white"
-            >
-              <option value="ALL">Tous</option>
-              <option value="PAU">PAU</option>
-              <option value="PAM">PAM</option>
-            </select>
-          </div>
           <table className="w-full table-auto divide-y divide-gray-200">
             <thead className="sticky top-0 z-30 bg-white shadow-sm">
               <tr>
@@ -504,18 +726,18 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                               LOT COMPOSÉ
                             </span>
                           ) : (
-                            <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs font-medium">
+                            <span className="px-2 py-1 bg-purple-100 text-purple-800 rounded-full text-xs font-medium">
                               LOT SIMPLE
                             </span>
                           )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="h-12 w-12 bg-purple-200 rounded-lg flex items-center justify-center">
-                            <PackagePlus size={20} className="text-purple-600" />
+                          <div className="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center">
+                            <ImageIcon size={24} className="text-gray-400" />
                           </div>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="text-sm font-medium text-gray-900">{item.sku}</div>
+                          <div className="text-sm font-medium text-gray-900">{(item.sku || '').toUpperCase()}</div>
                         </td>
                         <td className="px-6 py-4">
                           <div className="text-sm text-gray-900">{item.name}</div>
@@ -618,10 +840,17 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                             const isLow = alertVal !== null && (item.stock ?? 0) <= alertVal;
                             const iconColor = isLow ? "text-red-600" : "text-gray-500";
                             return (
-                              <span className="flex items-center gap-2 text-sm">
-                                <Package size={16} className={iconColor} />
-                                <span className="text-gray-900">{item.stock || 0}</span>
-                              </span>
+                              <div className="flex flex-col text-sm">
+                                <span className="flex items-center gap-2">
+                                  <Package size={16} className={iconColor} />
+                                  <span className="text-gray-900">{item.stock || 0}</span>
+                                </span>
+                                {(item as any).lot_units_per_lot ? (
+                                  <span className="text-xs text-gray-500">
+                                    {(item.stock || 0)} × {(item as any).lot_units_per_lot} unités
+                                  </span>
+                                ) : null}
+                              </div>
                             );
                           })()}
                         </td>
@@ -648,7 +877,12 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                               onClick={async () => {
                                 if (window.confirm('Supprimer ce lot ?')) {
                                   try {
-                                    await deleteLot(item.id as string);
+                                    const lotId = (item as any).id ?? (item as any).lot_id;
+                                    if (!lotId) {
+                                      alert("ID du lot introuvable, suppression annulée.");
+                                      return;
+                                    }
+                                    await deleteLot(lotId as string);
                                     await fetchLots();
                                   } catch (e) {
                                     console.error('Erreur suppression lot:', e);
@@ -766,8 +1000,17 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           {product.parent_id ? (
-                            <span className="px-2 py-1 bg-teal-100 text-teal-800 rounded-full text-xs font-medium">
-                              MIROIR
+                            <div className="flex flex-col gap-1">
+                              <span className="px-2 py-1 bg-teal-100 text-teal-800 rounded-full text-xs font-medium">
+                                MIROIR
+                              </span>
+                              <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs font-medium">
+                                PAU
+                              </span>
+                            </div>
+                          ) : hasMirrorChildren(product.id) ? (
+                            <span className="px-2 py-1 bg-indigo-100 text-indigo-800 rounded-full text-xs font-medium">
+                              PARENT MIROIR
                             </span>
                           ) : product.product_type === 'PAM' ? (
                             <span className="px-2 py-1 bg-orange-100 text-orange-800 rounded-full text-xs font-medium">
@@ -807,7 +1050,7 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <div className="flex flex-col space-y-2">
-                            <span className="text-sm font-medium text-gray-900">{product.sku}</span>
+                            <span className="text-sm font-medium text-gray-900">{(product.sku || '').toUpperCase()}</span>
                             {product.parent_id ? (
                               !product.serial_number ? (
                                 // ENFANT MIROIR: boutons réservés aux miroirs
@@ -845,7 +1088,7 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                                   title="Voir le parent"
                                 >
                                   <ExternalLink size={12} />
-                                  Voir parent
+                                  Voir le parent
                                 </button>
                                 <button
                                   onClick={(e) => {
@@ -1218,6 +1461,35 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                               );
                             }
                             // Fallback for produits simples / miroirs (pas d'enfants sérialisés)
+                            // Si c'est un miroir enfant, afficher le stock du parent (pilote unique)
+                            if (product.parent_id) {
+                              const parent = parentForMirror[product.id] as any;
+                              if (parent) {
+                                const parentTotal = (parent.stocks || []).reduce((sum: number, s: any) => sum + (s.quantite || 0), 0);
+                                const alertValP = parent.stock_alert ?? null;
+                                const isLowP = alertValP !== null && parentTotal <= alertValP;
+                                const iconColorP = isLowP ? "text-red-600" : "text-gray-500";
+                                return (
+                                  <div className="flex flex-col">
+                                    <span className="flex items-center gap-2">
+                                      <Package size={16} className={iconColorP} />
+                                      <span className="text-gray-900 font-bold">{parentTotal}</span>
+                                    </span>
+                                    <div className="mt-1 space-y-0.5">
+                                      {(parent.stocks || []).map((s: any, idx: number) => (
+                                        <div key={(s.stock && s.stock.id) || s.stock_id || idx} className="text-xs text-gray-500">
+                                          {s.stock?.name} ({s.quantite})
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                );
+                              } else {
+                                return <span className="text-xs text-gray-400">—</span>;
+                              }
+                            }
+
+                            // Fallback standard pour produit simple (non miroir)
                             const alertVal = product.stock_alert ?? null;
                             const isLow = alertVal !== null && totalStock < alertVal;
                             const iconColor = isLow ? "text-red-600" : "text-gray-500";
@@ -1225,7 +1497,7 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                               <div className="flex flex-col">
                                 <span className="flex items-center gap-2">
                                   <Package size={16} className={iconColor} />
-                                    <span className="text-gray-900 font-bold">{totalStock}</span>
+                                  <span className="text-gray-900 font-bold">{totalStock}</span>
                                 </span>
                                 <div className="mt-1 space-y-0.5">
                                   {(product.stocks || []).map((s: any, idx: number) => (
@@ -1239,30 +1511,45 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                           })()}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-bold">
-                                {product.stock_alert ?? '-'}
+                          {product.parent_id ? (parentForMirror[product.id]?.stock_alert ?? '-') : (product.stock_alert ?? '-')}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-bold">
                           {product.location || '-'}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                           <div className="flex space-x-2">
-                            <button
-                              onClick={() => setEditingProduct(product.id)}
-                              className="text-blue-600 hover:text-blue-800"
-                              title="Modifier"
-                            >
-                              <Pen size={18} />
-                            </button>
-                            {/* Bouton Créer un miroir - disponible pour parents et miroirs (toujours rattaché au parent) */}
-                            <button
-                              onClick={async () => {
-                                await openMirrorModalFor(product);
-                              }}
-                              className="text-green-600 hover:text-green-800"
-                              title="Créer un produit miroir"
-                            >
-                              <Users size={18} />
-                            </button>
+                            {product.parent_id ? (
+                              <button
+                                onClick={() => {
+                                  setMirrorChildToEdit(product as any);
+                                  setShowMirrorChildEditModal(true);
+                                }}
+                                className="text-blue-600 hover:text-blue-800"
+                                title="Modifier le miroir"
+                              >
+                                <Pen size={18} />
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => setEditingProduct(product.id)}
+                                className="text-blue-600 hover:text-blue-800"
+                                title="Modifier"
+                              >
+                                <Pen size={18} />
+                              </button>
+                            )}
+                            {/* Bouton Créer un miroir - caché pour parents PAM */}
+                            {!(product.product_type === 'PAM' && !product.parent_id) && (
+                              <button
+                                onClick={async () => {
+                                  await openMirrorModalFor(product);
+                                }}
+                                className="text-green-600 hover:text-green-800"
+                                title="Créer un produit miroir"
+                              >
+                                <Users size={18} />
+                              </button>
+                            )}
                             {canCreateLot(product) && (
                               <button
                                 type="button"
@@ -1296,9 +1583,14 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                             />
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs font-medium">
-                              PRODUIT
-                            </span>
+                            <div className="flex flex-col gap-1">
+                              <span className="px-2 py-1 bg-indigo-100 text-indigo-800 rounded-full text-xs font-medium">
+                                PARENT MIROIR
+                              </span>
+                              <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs font-medium">
+                                {parentInline?.product_type === 'PAM' ? 'PAM' : 'PAU'}
+                              </span>
+                            </div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
                             <div className="relative group">
@@ -1321,7 +1613,7 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
                             <div className="flex flex-col space-y-2">
-                              <span className="text-sm font-medium text-gray-900">{parentInline?.sku}</span>
+                              <span className="text-sm font-medium text-gray-900">{(parentInline?.sku || '').toUpperCase()}</span>
                             </div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
@@ -1450,15 +1742,17 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                               >
                                 <Pen size={18} />
                               </button>
-                              <button
-                                onClick={async () => {
-                                  await openMirrorModalFor(parentInline as any);
-                                }}
-                                className="text-green-600 hover:text-green-800"
-                                title="Créer un produit miroir"
-                              >
-                                <Users size={18} />
-                              </button>
+                              {parentInline?.product_type !== 'PAM' && (
+                                <button
+                                  onClick={async () => {
+                                    await openMirrorModalFor(parentInline as any);
+                                  }}
+                                  className="text-green-600 hover:text-green-800"
+                                  title="Créer un produit miroir"
+                                >
+                                  <Users size={18} />
+                                </button>
+                              )}
                               <button
                                 onClick={() => setShowDeleteConfirm(parentInline.id)}
                                 className="text-red-600 hover:text-red-800"
@@ -1526,7 +1820,7 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                                             </td>
                                             <td className="px-4 py-2 text-sm">
                                               <div className="flex flex-col gap-1 whitespace-normal break-all">
-                                                <span className="font-medium">{child.sku}</span>
+                                                <span className="font-medium">{(child.sku || '').toUpperCase()}</span>
                                               </div>
                                             </td>
                                             <td className="px-4 py-2 text-sm">{child.name}</td>
@@ -1641,7 +1935,7 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                                               </div>
                                             </td>
                                             <td className="px-4 py-2 text-sm text-gray-500">
-                                              {child.stock_alert ?? '-'}
+                                              {product.stock_alert ?? '-'}
                                             </td>
                                             <td className="px-4 py-2 text-sm text-gray-500">
                                               {child.location || '-'}
@@ -1651,10 +1945,11 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                                                 <button
                                                   onClick={(e) => {
                                                     e.preventDefault();
-                                                    setEditingProduct(child.id);
+                                                    setMirrorChildToEdit(child);
+                                                    setShowMirrorChildEditModal(true);
                                                   }}
                                                   className="text-blue-600 hover:text-blue-800"
-                                                  title="Modifier"
+                                                  title="Modifier le miroir"
                                                 >
                                                   <Edit size={18} />
                                                 </button>
@@ -1729,7 +2024,7 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                                                 </div>
                                               </td>
                                               <td className="px-4 py-2 text-sm">
-                                                <span className="font-medium">{product.sku}</span>
+                                                <span className="font-medium">{(product.sku || '').toUpperCase()}</span>
                                               </td>
                                               <td className="px-4 py-2 text-sm">{product.name}</td>
                                               <td className="px-4 py-2 text-sm">
@@ -2166,10 +2461,16 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
             </div>
               <ProductForm
                 initialProduct={products.find(p => p.id === editingProduct) as any}
-                onSubmitSuccess={() => {
+                onSubmitSuccess={async () => {
                   const edited = products.find(p => p.id === editingProduct);
                   setEditingProduct(null);
                   setShowImageManager(false);
+                  // Rafraîchir la liste pour refléter stock_alert et autres changements
+                  const updatedProducts = await fetchProducts();
+                  if (updatedProducts) {
+                    const listProducts = updatedProducts.filter(p => !p.serial_number);
+                    setProducts(listProducts as any);
+                  }
                   // Si c'est un parent (pas de parent_id), ouvrir le modal de répartition des stocks
                   if (edited && !edited.parent_id) {
                     setManagingStockProduct(edited.id);
@@ -2291,6 +2592,36 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
           }}
         />
       )}
+
+      {/* Mirror Child Edit Modal */}
+      <MirrorChildEditModal
+        isOpen={showMirrorChildEditModal}
+        child={mirrorChildToEdit}
+        parent={mirrorChildToEdit ? (parentForMirror[mirrorChildToEdit.id] ?? null) : null}
+        onClose={() => {
+          setShowMirrorChildEditModal(false);
+          setMirrorChildToEdit(null);
+        }}
+        onUpdated={async () => {
+          const updatedProducts = await fetchProducts();
+          if (updatedProducts) {
+            const listProducts = updatedProducts.filter(p => !p.serial_number);
+            setProducts(listProducts as any);
+          }
+          if (mirrorChildToEdit?.parent_id) {
+            const { data } = await supabase
+              .from('products')
+              .select('*')
+              .eq('parent_id', mirrorChildToEdit.parent_id as any);
+            setChildProducts(prev => ({
+              ...prev,
+              [mirrorChildToEdit.parent_id!]: (data as unknown as any[]) || []
+            }));
+          }
+        }}
+        onOpenParentStock={(pid) => setManagingStockProduct(pid)}
+        onOpenParentEdit={(pid) => setEditingProduct(pid)}
+      />
 
       {/* Mirror Product Modal */}
       {showMirrorModal && selectedMirrorParent && (

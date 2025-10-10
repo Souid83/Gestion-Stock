@@ -34,14 +34,81 @@ export const useLotStore = create<LotStore>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       console.log('Fetching lots...');
-      const { data, error } = await supabase
-        .from('lots_with_components')
-        .select('*');
+      // Reconstitution des lots sans dépendre de la vue lots_with_components (qui peut être vide selon RLS/vue)
+      // 1) Charger les lots
+      const { data: lotsRows, error: lotsErr } = await supabase
+        .from('lots')
+        .select('id,name,sku,type,quantity_per_lot,margin_pro_percent,margin_retail_percent,purchase_price_ht,selling_price_ht,selling_price_ttc,stock,stock_alert,location,vat_type,created_at,updated_at')
+        .order('created_at', { ascending: false });
+      if (lotsErr) throw lotsErr;
 
-      if (error) throw error;
-      
-      // Base lots from view
-      const lots = (data as any[] || []) as LotWithComponents[];
+      const lotList = (lotsRows as any[]) || [];
+      const lotIds: string[] = lotList.map((l: any) => l.id).filter(Boolean);
+      let lots: LotWithComponents[] = [];
+
+      if (lotIds.length === 0) {
+        lots = [];
+      } else {
+        // 2) Charger les composants des lots
+        const { data: compRows, error: compErr } = await supabase
+          .from('lot_components')
+          .select('id, lot_id, product_id, quantity, depots_utilises')
+          .in('lot_id', lotIds as any);
+        if (compErr) throw compErr;
+        const components = (compRows as any[]) || [];
+
+        // 3) Récupérer infos produits pour enrichir les composants
+        const productIds = Array.from(new Set(components.map((c: any) => c.product_id).filter(Boolean)));
+        let productsById: Record<string, any> = {};
+        if (productIds.length > 0) {
+          const { data: prodRows } = await supabase
+            .from('products')
+            .select('id,name,sku')
+            .in('id', productIds as any);
+          (prodRows as any[] || []).forEach((p: any) => {
+            productsById[p.id] = p;
+          });
+        }
+
+        // 4) Optionnel: agréger le stock des composants (cross-dépôts)
+        let stockByProduct: Record<string, number> = {};
+        if (productIds.length > 0) {
+          const { data: stockRows } = await supabase
+            .from('stock_produit')
+            .select('produit_id, quantite')
+            .in('produit_id', productIds as any);
+          (stockRows as any[] || []).forEach((r: any) => {
+            const pid = r.produit_id;
+            stockByProduct[pid] = (stockByProduct[pid] || 0) + (r.quantite || 0);
+          });
+        }
+
+        // 5) Construire components par lot
+        const compsByLot = new Map<string, any[]>();
+        for (const c of components) {
+          const arr = compsByLot.get(c.lot_id) || [];
+          const prod = productsById[c.product_id] || {};
+          arr.push({
+            id: c.id,
+            product_id: c.product_id,
+            quantity: c.quantity,
+            depots_utilises: c.depots_utilises || [],
+            product_name: prod.name || '',
+            product_sku: prod.sku || '',
+            product_stock: stockByProduct[c.product_id] || 0
+          });
+          compsByLot.set(c.lot_id, arr);
+        }
+
+        // 6) Assembler les lots enrichis
+        lots = lotList.map((l: any) => {
+          const comps = compsByLot.get(l.id) || [];
+          return {
+            ...l,
+            components: comps
+          } as LotWithComponents;
+        });
+      }
 
       // Enrich with stock_alert and location directly from lots table
       if (lots.length > 0) {
@@ -49,16 +116,27 @@ export const useLotStore = create<LotStore>((set, get) => ({
         if (ids.length > 0) {
           const { data: baseLots, error: baseErr } = await supabase
             .from('lots')
-            .select('id, stock_alert, location')
+            .select('id, name, sku, stock_alert, location, margin_pro_percent, margin_retail_percent')
             .in('id', ids as any);
           if (!baseErr && Array.isArray(baseLots)) {
             const extras = Object.fromEntries(
-              (baseLots as any[]).map((r: any) => [r.id, { stock_alert: r.stock_alert, location: r.location }])
+              (baseLots as any[]).map((r: any) => [r.id, {
+                name: r.name,
+                sku: r.sku,
+                stock_alert: r.stock_alert,
+                location: r.location,
+                margin_pro_percent: r.margin_pro_percent,
+                margin_retail_percent: r.margin_retail_percent
+              }])
             );
             for (const l of lots as any[]) {
               const extra = extras[l.id];
               if (extra) {
-                // Only override if view didn’t provide them (or to ensure freshness)
+                // Ensure latest base table fields override or fill missing view fields
+                l.name = extra.name ?? l.name;
+                l.sku = extra.sku ?? l.sku;
+                (l as any).margin_pro_percent = extra.margin_pro_percent ?? (l as any).margin_pro_percent;
+                (l as any).margin_retail_percent = extra.margin_retail_percent ?? (l as any).margin_retail_percent;
                 l.stock_alert = extra.stock_alert;
                 l.location = extra.location;
               }
@@ -97,10 +175,14 @@ export const useLotStore = create<LotStore>((set, get) => ({
       // Enrich single lot with stock_alert and location from base table
       const { data: baseLot, error: baseErr } = await supabase
         .from('lots')
-        .select('id, stock_alert, location')
+        .select('id, name, sku, stock_alert, location, margin_pro_percent, margin_retail_percent')
         .eq('id', id as any)
         .single();
       if (!baseErr && baseLot) {
+        (lot as any).name = (baseLot as any).name ?? (lot as any).name;
+        (lot as any).sku = (baseLot as any).sku ?? (lot as any).sku;
+        (lot as any).margin_pro_percent = (baseLot as any).margin_pro_percent ?? (lot as any).margin_pro_percent;
+        (lot as any).margin_retail_percent = (baseLot as any).margin_retail_percent ?? (lot as any).margin_retail_percent;
         (lot as any).stock_alert = (baseLot as any).stock_alert;
         (lot as any).location = (baseLot as any).location;
       }
@@ -122,6 +204,25 @@ export const useLotStore = create<LotStore>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       console.log('Creating new lot:', lotData);
+      const trimmedSku = (lotData.sku || '').trim();
+
+      // Guard: prevent duplicate SKU creation
+      try {
+        const { data: existing, error: existingErr } = await supabase
+          .from('lots')
+          .select('id')
+          .eq('sku', trimmedSku as any)
+          .maybeSingle();
+        if (!existingErr && existing) {
+          const msg = `SKU déjà existant: ${lotData.sku}`;
+          console.warn(msg);
+          set({ error: msg, isLoading: false });
+          return null;
+        }
+      } catch (e) {
+        // Non-bloquant: on continue si la vérification échoue, les inserts plus bas feront foi
+        console.warn('SKU pre-check failed, continuing with creation:', e);
+      }
       
       // Calculate base purchase price (0€ margin), then derive prices from percents
       const base = await get().calculateLotPrices(
@@ -146,7 +247,7 @@ export const useLotStore = create<LotStore>((set, get) => ({
       try {
         const insertPayload: any = {
           name: lotData.name,
-          sku: lotData.sku,
+          sku: trimmedSku,
           type: lotData.type,
           quantity_per_lot: lotData.quantity_per_lot,
           purchase_price_ht: base.purchasePriceHT,
@@ -249,7 +350,7 @@ export const useLotStore = create<LotStore>((set, get) => ({
 
       if (updateResp.error) throw updateResp.error;
       
-      const updatedLot = updateResp.data as Lot;
+      const updatedLot = (updateResp.data as unknown) as Lot;
       
       // Refresh lots list
       await get().fetchLots();
@@ -298,28 +399,49 @@ export const useLotStore = create<LotStore>((set, get) => ({
       
       if (components.length === 0) return 0;
       
-      // Get stock for each component
-      const { data: products, error } = await supabase
-        .from('products')
-        .select('id, stock')
-        .in('id', components.map(c => c.product_id) as any);
-        
+      // Get cross-depot stock for each component from stock_produit
+      const componentIds = components.map(c => c.product_id) as any;
+      const { data: stockRows, error } = await supabase
+        .from('stock_produit')
+        .select('produit_id, quantite')
+        .in('produit_id', componentIds);
       if (error) throw error;
-      const productsAny = (products as any[]) || [];
-      
-      // Calculate minimum possible lots
-      let minStock = Infinity;
-      
-      for (const component of components) {
-        const product = productsAny.find((p: any) => p.id === component.product_id);
-        if (product) {
-          const possibleLots = Math.floor(product.stock / component.quantity);
-          minStock = Math.min(minStock, possibleLots);
+
+      const totals: Record<string, number> = {};
+      ((stockRows as any[]) || []).forEach((r: any) => {
+        const pid = r.produit_id;
+        totals[pid] = (totals[pid] || 0) + (r.quantite || 0);
+      });
+
+      // Fallback: compléter avec le stock partagé (products_with_stock.shared_quantity)
+      try {
+        const missingIds = componentIds.filter((id: string) => (totals[id] ?? 0) === 0);
+        if (missingIds.length > 0) {
+          const { data: vwRows } = await supabase
+            .from('products_with_stock')
+            .select('id, shared_quantity')
+            .in('id', missingIds as any);
+          ((vwRows as any[]) || []).forEach((v: any) => {
+            if (typeof v.shared_quantity === 'number' && v.shared_quantity > 0) {
+              totals[v.id] = (totals[v.id] || 0) + v.shared_quantity;
+            }
+          });
         }
+      } catch (e) {
+        console.warn('Fallback products_with_stock in calculateLotStock failed:', e);
       }
-      
+
+      // Calculate minimum possible lots across all components
+      let minStock = Infinity;
+      for (const component of components) {
+        const totalForComp = totals[component.product_id] || 0;
+        const qtyPerLot = Number(component.quantity || 1);
+        const possibleLots = Math.floor(totalForComp / qtyPerLot);
+        minStock = Math.min(minStock, isFinite(possibleLots) ? possibleLots : 0);
+      }
+
       const result = minStock === Infinity ? 0 : minStock;
-      console.log('Calculated lot stock:', result);
+      console.log('Calculated lot stock (cross-depots):', result);
       return result;
     } catch (error) {
       console.error('Error calculating lot stock:', error);
@@ -443,6 +565,7 @@ export const useLotStore = create<LotStore>((set, get) => ({
           .select('id, name, sku, purchase_price_with_fees, stock, is_parent, serial_number, mirror_of')
           .eq('sku', skuParent as any)
           .single();
+        const parentProductAny = parentProduct as any;
           
         if (productError || !parentProduct) {
           errors.push(`Line ${i+1}: Product with SKU "${skuParent}" not found`);
@@ -450,14 +573,14 @@ export const useLotStore = create<LotStore>((set, get) => ({
         }
         
         // Validate product is eligible for lots (prix d'achat unique)
-        if (parentProduct.serial_number || parentProduct.mirror_of || !parentProduct.is_parent) {
+        if (parentProductAny?.serial_number || parentProductAny?.mirror_of || !parentProductAny?.is_parent) {
           errors.push(`Line ${i+1}: Product "${skuParent}" is not eligible for lots (must be single purchase price product)`);
           continue;
         }
         
         // Generate SKU and name if not provided
-        const finalSku = skuLot || `LOT${quantity}-${parentProduct.sku}`;
-        const finalName = nomLot || `Lot de ${quantity} ${parentProduct.name}`;
+        const finalSku = skuLot || `LOT${quantity}-${(parentProductAny?.sku ?? '')}`;
+        const finalName = nomLot || `Lot de ${quantity} ${(parentProductAny?.name ?? '')}`;
         
         // Check if SKU already exists
         const { data: existingLot } = await supabase
@@ -473,19 +596,19 @@ export const useLotStore = create<LotStore>((set, get) => ({
         
         // Calculate prices (CSV 'marge' is now a retail percent) and stock
         const base = await get().calculateLotPrices(
-          [{ product_id: parentProduct.id, quantity }],
+          [{ product_id: (parentProductAny?.id as string), quantity }],
           0,
           'normal'
         );
         const retailMarginHT = base.purchasePriceHT * (margin / 100);
         const prices = await get().calculateLotPrices(
-          [{ product_id: parentProduct.id, quantity }],
+          [{ product_id: (parentProductAny?.id as string), quantity }],
           retailMarginHT,
           'normal'
         );
 
         const stock = await get().calculateLotStock(
-          [{ product_id: parentProduct.id, quantity }]
+          [{ product_id: (parentProductAny?.id as string), quantity }]
         );
         
         // Create the lot

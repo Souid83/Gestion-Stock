@@ -27,6 +27,33 @@ export const MirrorProductModal: React.FC<MirrorProductModalProps> = ({
   });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const downloadSampleCSV = () => {
+    try {
+      const parentSku = (parentProduct?.sku || 'PARENT')
+        .toString()
+        .replace(/[^a-zA-Z0-9_-]/g, '_');
+      const headers = ['parent_sku', 'name', 'sku'];
+      const rows = [
+        [parentSku, 'lcd iphone 12 original', 'LCDIPHONE120001'],
+        [parentSku, 'lcd iphone 8 générique', 'lcdiphone80002']
+      ];
+      const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      const safeSku = (parentProduct?.sku || 'parent')
+        .toString()
+        .replace(/[^a-zA-Z0-9_-]/g, '_');
+      link.download = `mirrors_template_${safeSku}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (e) {
+      console.error('Error generating sample CSV:', e);
+      alert('Impossible de générer le modèle CSV.');
+    }
+  };
   const [showCSVModal, setShowCSVModal] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -43,6 +70,8 @@ export const MirrorProductModal: React.FC<MirrorProductModalProps> = ({
     setIsLoading(true);
     setError(null);
 
+    const skuUpper = formData.sku.trim().toUpperCase();
+
     try {
       console.log('Creating mirror product for parent:', parentProduct.id);
 
@@ -50,7 +79,7 @@ export const MirrorProductModal: React.FC<MirrorProductModalProps> = ({
       const { data: existingProduct } = await supabase
         .from('products')
         .select('id')
-        .filter('sku', 'eq', formData.sku.trim())
+        .ilike('sku', skuUpper)
         .maybeSingle();
 
       if (existingProduct) {
@@ -59,14 +88,25 @@ export const MirrorProductModal: React.FC<MirrorProductModalProps> = ({
         return;
       }
 
-      // 2) Utiliser le parent direct tel quel (pas de remontée vers un parent racine)
+      // 2) Sécuriser le parent cible:
+      //    Si jamais on reçoit un miroir enfant par erreur, remonter au parent d'origine
       let rootParent: any = parentProduct as any;
+      if ((parentProduct as any)?.parent_id) {
+        const { data: trueParent } = await supabase
+          .from('products')
+          .select('*')
+          .eq('id', (parentProduct as any).parent_id as any)
+          .maybeSingle();
+        if (trueParent) {
+          rootParent = trueParent as any;
+        }
+      }
 
       // 3) Construire le payload: copier toutes les données du parent sauf sku et name.
       //    Forcer serial_number = NULL. parent_id = rootParent.id
       const payload: any = {
         name: formData.name.trim(),
-        sku: formData.sku.trim(),
+        sku: skuUpper,
         description: rootParent.description,
         purchase_price_with_fees: rootParent.purchase_price_with_fees,
         raw_purchase_price: rootParent.raw_purchase_price,
@@ -89,7 +129,8 @@ export const MirrorProductModal: React.FC<MirrorProductModalProps> = ({
         variants: rootParent.variants,
         shipping_box_id: rootParent.shipping_box_id,
         parent_id: rootParent.id,
-        serial_number: null
+        serial_number: null,
+        is_parent: false
       };
 
       // 4) Créer le miroir
@@ -252,9 +293,43 @@ const CSVMirrorImportModal: React.FC<CSVMirrorImportModalProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Téléchargement du modèle CSV (local à ce modal)
+  const handleDownloadMirrorCSV = () => {
+    try {
+      const parentSku = (parentProduct?.sku || 'PARENT')
+        .toString()
+        .replace(/[^a-zA-Z0-9_-]/g, '_');
+      const headers = ['parent_sku', 'name', 'sku'];
+      const rows = [
+        [parentSku, 'lcd iphone 12 original', 'LCDIPHONE120001'],
+        [parentSku, 'lcd iphone 8 générique', 'lcdiphone80002']
+      ];
+      const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      const safeSku = (parentProduct?.sku || 'parent')
+        .toString()
+        .replace(/[^a-zA-Z0-9_-]/g, '_');
+      link.download = `mirrors_template_${safeSku}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (e) {
+      console.error('Error generating sample CSV:', e);
+      alert('Impossible de générer le modèle CSV.');
+    }
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
-    if (selectedFile && selectedFile.type === 'text/csv') {
+    if (
+      selectedFile &&
+      (
+        (selectedFile.type && selectedFile.type.toLowerCase().includes('csv')) ||
+        (selectedFile.name && selectedFile.name.toLowerCase().endsWith('.csv'))
+      )
+    ) {
       setFile(selectedFile);
       setError(null);
       
@@ -293,41 +368,97 @@ const CSVMirrorImportModal: React.FC<CSVMirrorImportModalProps> = ({
           const data = lines.map(line => line.split(',').map(cell => cell.trim()));
           
           // Supposer que la première ligne contient les en-têtes
-          const headers = data[0];
-          const nameIndex = headers.findIndex(h => h.toLowerCase().includes('nom') || h.toLowerCase().includes('name'));
-          
-          if (nameIndex === -1) {
-            throw new Error('Colonne "nom" non trouvée dans le fichier CSV');
+          const headers = (data[0] || []).map((h: string) => (h || '').trim());
+          const findIdx = (key: string) =>
+            headers.findIndex(
+              (h: string) =>
+                h.toLowerCase() === key ||
+                h.toLowerCase().includes(key)
+            );
+
+          const parentIdx = findIdx('parent_sku');
+          const nameIdx = (() => {
+            const nx = findIdx('name');
+            if (nx !== -1) return nx;
+            return findIdx('nom');
+          })();
+          const skuIdx = headers.findIndex((h: string) => h.toLowerCase() === 'sku');
+
+          if (nameIdx === -1 && skuIdx === -1) {
+            throw new Error('Le fichier doit contenir au moins une colonne "name"/"nom" ou "sku".');
           }
 
-          // Créer les produits miroirs avec uniquement parent_id et les champs copiés du parent
-          const mirrorProducts = data.slice(1).map((row, index) => ({
-            name: row[nameIndex] || `Miroir ${index + 1}`,
-            sku: `${parentProduct.sku}-MIRROR-${Date.now()}-${index}`,
-            description: parentProduct.description,
-            purchase_price_with_fees: parentProduct.purchase_price_with_fees,
-            raw_purchase_price: parentProduct.raw_purchase_price,
-            retail_price: parentProduct.retail_price,
-            pro_price: parentProduct.pro_price,
-            stock_alert: parentProduct.stock_alert,
-            location: parentProduct.location,
-            vat_type: parentProduct.vat_type,
-            margin_percent: parentProduct.margin_percent,
-            margin_value: parentProduct.margin_value,
-            pro_margin_percent: parentProduct.pro_margin_percent,
-            pro_margin_value: parentProduct.pro_margin_value,
-            weight_grams: parentProduct.weight_grams,
-            ean: parentProduct.ean,
-            width_cm: parentProduct.width_cm,
-            height_cm: parentProduct.height_cm,
-            depth_cm: parentProduct.depth_cm,
-            category_id: parentProduct.category_id,
-            images: parentProduct.images,
-            variants: parentProduct.variants,
-            shipping_box_id: parentProduct.shipping_box_id,
-            serial_number: null,
-            parent_id: parentProduct.id
-          } as any));
+          // Cache pour éviter des requêtes répétées par parent_sku
+          const parentCache: Record<string, any> = {};
+
+          const resolveParent = async (sku: string) => {
+            if (!sku) return parentProduct as any;
+            const key = sku.trim().toUpperCase();
+            if (parentCache[key]) return parentCache[key];
+
+            const { data: found } = await supabase
+              .from('products')
+              .select('*')
+              .ilike('sku', key)
+              .maybeSingle();
+
+            let target = found || (parentProduct as any);
+            if (target?.parent_id) {
+              const { data: root } = await supabase
+                .from('products')
+                .select('*')
+                .eq('id', target.parent_id as any)
+                .maybeSingle();
+              if (root) target = root as any;
+            }
+            parentCache[key] = target;
+            return target;
+          };
+
+          const mirrorProducts: any[] = [];
+          for (let i = 1; i < data.length; i++) {
+            const row = data[i];
+            if (!row || row.length === 0) continue;
+
+            const parentSkuCell = parentIdx !== -1 ? (row[parentIdx] || '').trim().toUpperCase() : '';
+            const nameCell =
+              (nameIdx !== -1 ? (row[nameIdx] || '') : '') ||
+              '';
+            const skuCell = skuIdx !== -1 ? (row[skuIdx] || '').trim().toUpperCase() : '';
+
+            const targetParent = await resolveParent(parentSkuCell);
+            const nameFinal = (nameCell || '').trim() || `Miroir ${i}`;
+            const computedSkuBase = (targetParent?.sku || 'PARENT').toString().replace(/[^a-zA-Z0-9_-]/g, '_');
+            const skuFinal = (skuCell || `${computedSkuBase}-MIRROR-${Date.now()}-${i - 1}`).toUpperCase();
+
+            mirrorProducts.push({
+              name: nameFinal,
+              sku: skuFinal,
+              description: targetParent.description,
+              purchase_price_with_fees: targetParent.purchase_price_with_fees,
+              raw_purchase_price: targetParent.raw_purchase_price,
+              retail_price: targetParent.retail_price,
+              pro_price: targetParent.pro_price,
+              stock_alert: targetParent.stock_alert,
+              location: targetParent.location,
+              vat_type: targetParent.vat_type,
+              margin_percent: targetParent.margin_percent,
+              margin_value: targetParent.margin_value,
+              pro_margin_percent: targetParent.pro_margin_percent,
+              pro_margin_value: targetParent.pro_margin_value,
+              weight_grams: targetParent.weight_grams,
+              ean: targetParent.ean,
+              width_cm: targetParent.width_cm,
+              height_cm: targetParent.height_cm,
+              depth_cm: targetParent.depth_cm,
+              category_id: targetParent.category_id,
+              images: targetParent.images,
+              variants: targetParent.variants,
+              shipping_box_id: targetParent.shipping_box_id,
+              serial_number: null,
+              parent_id: targetParent.id
+            } as any);
+          }
 
           const { error: insertErr } = await supabase
             .from('products')
@@ -358,7 +489,7 @@ const CSVMirrorImportModal: React.FC<CSVMirrorImportModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-60">
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
       <div className="bg-white rounded-lg p-6 w-full max-w-2xl max-h-[80vh] overflow-y-auto">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-xl font-semibold">Import CSV - Produits miroirs</h2>
@@ -427,6 +558,13 @@ const CSVMirrorImportModal: React.FC<CSVMirrorImportModalProps> = ({
               className="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-400"
             >
               Annuler
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadMirrorCSV}
+              className="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700"
+            >
+              Modèle CSV
             </button>
             <button
               onClick={handleImport}

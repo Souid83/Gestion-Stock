@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { X, Plus, Trash2, Package, Search, Calculator } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { X, Plus, Trash2, Package, Search, Calculator, Minus } from 'lucide-react';
 import { useLotStore } from '../../store/lotStore';
 import { useProductStore } from '../../store/productStore';
 import { supabase } from '../../lib/supabase';
@@ -28,8 +28,8 @@ interface Stock {
 }
 
 export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProduct, lotId }) => {
-  const { createLot, updateLot, getLotById, calculateLotStock, calculateLotPrices, isLoading, error } = useLotStore();
-  const { products } = useProductStore();
+  const { createLot, updateLot, getLotById, calculateLotStock, calculateLotPrices, isLoading, error, fetchLots: refreshLots } = useLotStore();
+  const { products, fetchProducts } = useProductStore();
 
   const [lotType, setLotType] = useState<'simple' | 'compose'>('simple');
   const [formData, setFormData] = useState<LotFormData>({
@@ -62,6 +62,11 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
   const [productSearchTerm, setProductSearchTerm] = useState('');
   const [filteredProducts, setFilteredProducts] = useState<ProductWithStock[]>([]);
   const [showProductDropdown, setShowProductDropdown] = useState(false);
+  const productSearchInputRef = useRef<HTMLInputElement>(null);
+  const [highlightedIndex, setHighlightedIndex] = useState<number>(-1);
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+  const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Keep formData.type in sync with UI selection
   useEffect(() => {
@@ -71,6 +76,14 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
   useEffect(() => {
     if (isOpen) {
       fetchStocks();
+      try {
+        // Précharger la liste produits pour la recherche si nécessaire, seulement si vide
+        if (typeof fetchProducts === 'function' && (!products || products.length === 0)) {
+          fetchProducts();
+        }
+      } catch (e) {
+        console.warn('fetchProducts failed in LotModal open:', e);
+      }
 
       if (lotId) {
         // Load existing lot for editing
@@ -117,27 +130,37 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
     }
   }, [isOpen, parentProduct, lotId]);
 
+  // Debounce du terme de recherche
   useEffect(() => {
-    // Filter products for search (only single purchase price products)
-    if (productSearchTerm.trim() === '') {
+    const handler = setTimeout(() => {
+      setDebouncedSearchTerm(productSearchTerm);
+    }, 200);
+    return () => clearTimeout(handler);
+  }, [productSearchTerm]);
+
+  // Filtrage des produits (nom + SKU)
+  useEffect(() => {
+    if (debouncedSearchTerm.trim() === '') {
       setFilteredProducts([]);
+      setHighlightedIndex(-1);
     } else {
-      const lowercasedSearch = productSearchTerm.toLowerCase();
+      const lowercasedSearch = debouncedSearchTerm.toLowerCase();
       setFilteredProducts(
         products
           .filter(product =>
-            // Only products with single purchase price (no serial number, no mirror, is parent)
-            // If your data model changed, adapt this filter accordingly.
-            (product as any).is_parent &&
+            // Autoriser tous les produits non sérialisés et non miroirs (ne pas exiger is_parent)
             !product.serial_number &&
             !(product as any).mirror_of &&
-            (product.name.toLowerCase().includes(lowercasedSearch) ||
-              product.sku.toLowerCase().includes(lowercasedSearch))
+            (
+              (product.name || '').toLowerCase().includes(lowercasedSearch) ||
+              (product.sku || '').toLowerCase().includes(lowercasedSearch)
+            )
           )
           .slice(0, 10)
       );
+      setHighlightedIndex(0);
     }
-  }, [productSearchTerm, products]);
+  }, [debouncedSearchTerm, products]);
 
   useEffect(() => {
     // Recalculate stock and prices when components, margins or VAT type change
@@ -145,6 +168,20 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
       recalculateLot();
     }
   }, [components, marginProPercent, marginRetailPercent, formData.vat_type]);
+
+  // Auto-génération du nom pour lot composé si l'utilisateur n'a pas modifié manuellement
+  useEffect(() => {
+    if (lotType === 'compose' && !nameManuallyEdited) {
+      const autoName = components.map(c => c.product_name).filter(Boolean).join(' + ');
+      // Ne pas déclencher de setState si rien ne change (évite les boucles de rendu)
+      setFormData(prev => {
+        if (autoName && autoName !== prev.name) {
+          return { ...prev, name: autoName };
+        }
+        return prev;
+      });
+    }
+  }, [components, lotType, nameManuallyEdited]);
 
   const fetchStocks = async () => {
     try {
@@ -273,6 +310,31 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
     }
   };
 
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!showProductDropdown && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      setShowProductDropdown(true);
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlightedIndex((idx) => {
+        const next = idx < filteredProducts.length - 1 ? idx + 1 : filteredProducts.length - 1;
+        return next < 0 ? 0 : next;
+      });
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightedIndex((idx) => (idx > 0 ? idx - 1 : 0));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const sel = filteredProducts[highlightedIndex >= 0 ? highlightedIndex : 0];
+      if (sel) {
+        handleAddComponent(sel);
+      }
+    } else if (e.key === 'Escape') {
+      setShowProductDropdown(false);
+      setHighlightedIndex(-1);
+    }
+  };
+
   const handleAddComponent = (product: ProductWithStock) => {
     // Check if product is already in components
     if (components.some(c => c.product_id === product.id)) {
@@ -301,6 +363,8 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
 
     setProductSearchTerm('');
     setShowProductDropdown(false);
+    setHighlightedIndex(-1);
+    setTimeout(() => { productSearchInputRef.current?.focus(); }, 0);
   };
 
   const handleRemoveComponent = (productId: string) => {
@@ -326,16 +390,44 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
     }));
   };
 
+  const incrementComponentQuantity = (productId: string) => {
+    setComponents(prev => prev.map(c =>
+      c.product_id === productId ? { ...c, quantity: (c.quantity || 1) + 1 } : c
+    ));
+    setFormData(prev => ({
+      ...prev,
+      components: prev.components.map(c =>
+        c.product_id === productId ? { ...c, quantity: (c.quantity || 1) + 1 } : c
+      )
+    }));
+  };
+
+  const decrementComponentQuantity = (productId: string) => {
+    setComponents(prev => prev.map(c =>
+      c.product_id === productId ? { ...c, quantity: Math.max(1, (c.quantity || 1) - 1) } : c
+    ));
+    setFormData(prev => ({
+      ...prev,
+      components: prev.components.map(c =>
+        c.product_id === productId ? { ...c, quantity: Math.max(1, (c.quantity || 1) - 1) } : c
+      )
+    }));
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
 
     if (!formData.name || !formData.sku) {
       alert('Le nom et le SKU sont obligatoires');
+      setIsSubmitting(false);
       return;
     }
 
     if (components.length === 0) {
       alert('Veuillez ajouter au moins un composant');
+      setIsSubmitting(false);
       return;
     }
 
@@ -363,9 +455,20 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
         });
       }
 
+      // Sécurité: forcer un rafraîchissement des lots après sauvegarde
+      if (typeof refreshLots === 'function') {
+        try {
+          await refreshLots();
+        } catch (e) {
+          console.warn('refreshLots after save failed:', e);
+        }
+      }
+
       onClose();
     } catch (err) {
       console.error('Error saving lot:', err);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -454,7 +557,7 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
               <input
                 type="text"
                 value={formData.name}
-                onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+                onChange={(e) => { setNameManuallyEdited(true); setFormData(prev => ({ ...prev, name: e.target.value })); }}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 required
               />
@@ -580,6 +683,9 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
                 min="1"
                 required
               />
+              <p className="mt-1 text-xs text-gray-600">
+                Disponible: {calculatedStock} lot(s)
+              </p>
             </div>
           )}
 
@@ -594,25 +700,28 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
               {lotType === 'compose' && (
                 <div className="relative">
                   <input
+                    ref={productSearchInputRef}
                     type="text"
                     value={productSearchTerm}
                     onChange={(e) => {
                       setProductSearchTerm(e.target.value);
                       setShowProductDropdown(true);
                     }}
+                    onKeyDown={handleSearchKeyDown}
                     placeholder="Rechercher un produit..."
                     className="w-64 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     onFocus={() => setShowProductDropdown(true)}
+                    autoComplete="off"
                   />
                   <Search className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
 
                   {showProductDropdown && filteredProducts.length > 0 && (
                     <div className="absolute z-10 mt-1 w-full bg-white shadow-lg rounded-md max-h-60 overflow-auto">
                       <ul className="py-1">
-                        {filteredProducts.map(product => (
+                        {filteredProducts.map((product, idx) => (
                           <li
                             key={product.id}
-                            className="px-4 py-2 hover:bg-gray-100 cursor-pointer"
+                            className={`px-4 py-2 cursor-pointer ${idx === highlightedIndex ? 'bg-gray-100' : 'hover:bg-gray-100'}`}
                             onClick={() => handleAddComponent(product)}
                           >
                             <div className="font-medium">{product.name}</div>
@@ -668,13 +777,31 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
                           {component.product_stock}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <input
-                            type="number"
-                            value={component.quantity}
-                            onChange={(e) => handleComponentQuantityChange(component.product_id, parseInt(e.target.value) || 1)}
-                            className="w-20 px-2 py-1 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                            min="1"
-                          />
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => decrementComponentQuantity(component.product_id)}
+                              className="px-2 py-1 border border-gray-300 rounded text-gray-700 hover:bg-gray-50"
+                              title="Diminuer"
+                            >
+                              <Minus size={14} />
+                            </button>
+                            <input
+                              type="number"
+                              value={component.quantity}
+                              onChange={(e) => handleComponentQuantityChange(component.product_id, parseInt(e.target.value) || 1)}
+                              className="w-20 px-2 py-1 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                              min="1"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => incrementComponentQuantity(component.product_id)}
+                              className="px-2 py-1 border border-gray-300 rounded text-gray-700 hover:bg-gray-50"
+                              title="Augmenter"
+                            >
+                              <Plus size={14} />
+                            </button>
+                          </div>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           {lotType === 'compose' && (
@@ -797,11 +924,11 @@ export const LotModal: React.FC<LotModalProps> = ({ isOpen, onClose, parentProdu
             >
               Annuler
             </button>
-            <button
-              type="submit"
-              className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-              disabled={isLoading || !isFormValid}
-            >
+              <button
+                type="submit"
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                disabled={isLoading || isSubmitting || !isFormValid}
+              >
               {isLoading ? 'Enregistrement...' : (lotId ? 'Modifier' : 'Créer le lot')}
             </button>
           </div>

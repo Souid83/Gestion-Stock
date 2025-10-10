@@ -239,42 +239,110 @@ export const ProductForm: React.FC<ProductFormProps> = ({
     const fillRetail = () => {
       const pStr = retailPrice.ht;
       const pctStr = retailPrice.margin;
-      const thirdStr = retailPrice.ttc; // TTC in normal VAT; Net margin € in TVM
-      if (!onlyOneProvided(pStr, pctStr, thirdStr)) return;
+      const thirdStr = retailPrice.ttc; // TVA normale: TTC; TVM: Marge nette €
 
       if (vat === 'margin') {
+        // TVM: champs = Prix (TVM), Marge %, Marge nette (€)
         const price = parse(pStr);
         const pct = parse(pctStr);
         const net = parse(thirdStr);
-        if (isFinite(price)) {
-          const netVal = (price - purchase) / 1.2;
-          const pctVal = purchase > 0 ? (netVal / purchase) * 100 : 0;
-          setRetailPrice({ ht: fmt2(price), margin: fmt2(pctVal), ttc: fmt2(netVal) });
-        } else if (isFinite(pct)) {
-          const netVal = (purchase * pct) / 100;
-          const priceVal = purchase + netVal * 1.2;
-          setRetailPrice({ ht: fmt2(priceVal), margin: fmt2(pct), ttc: fmt2(netVal) });
-        } else if (isFinite(net)) {
-          const priceVal = purchase + net * 1.2;
-          const pctVal = purchase > 0 ? (net / purchase) * 100 : 0;
-          setRetailPrice({ ht: fmt2(priceVal), margin: fmt2(pctVal), ttc: fmt2(net) });
+
+        let newPrice: number | undefined;
+        let newPct: number | undefined;
+        let newNet: number | undefined;
+
+        const hasPrice = isFinite(price);
+        const hasPct = isFinite(pct);
+        const hasNet = isFinite(net);
+        const priceEmpty = (pStr ?? '').toString().trim() === '';
+        const pctEmpty = (pctStr ?? '').toString().trim() === '';
+        const netEmpty = (thirdStr ?? '').toString().trim() === '';
+
+        if (hasPrice) {
+          if (netEmpty) {
+            const netVal = (price - purchase) / 1.2;
+            newNet = netVal;
+          }
+          if (pctEmpty) {
+            const netVal = hasNet ? net : ((price - purchase) / 1.2);
+            const pctVal = purchase > 0 ? (netVal / purchase) * 100 : 0;
+            newPct = pctVal;
+          }
+        } else if (hasNet) {
+          if (priceEmpty) {
+            const priceVal = purchase + net * 1.2;
+            newPrice = priceVal;
+          }
+          if (pctEmpty) {
+            const pctVal = purchase > 0 ? (net / purchase) * 100 : 0;
+            newPct = pctVal;
+          }
+        } else if (hasPct) {
+          if (netEmpty) {
+            const netVal = (purchase * pct) / 100;
+            newNet = netVal;
+          }
+          if (priceEmpty) {
+            const baseNet = netEmpty ? (purchase * pct) / 100 : net;
+            const priceVal = purchase + baseNet * 1.2;
+            newPrice = priceVal;
+          }
+        }
+
+        if (newPrice !== undefined || newPct !== undefined || newNet !== undefined) {
+          setRetailPrice(prev => ({
+            ht: newPrice !== undefined ? fmt2(newPrice) : prev.ht,
+            margin: newPct !== undefined ? fmt2(newPct) : prev.margin,
+            ttc: newNet !== undefined ? fmt2(newNet) : prev.ttc
+          }));
         }
       } else {
+        // TVA normale: champs = Prix HT, Marge %, Prix TTC
         const ht = parse(pStr);
         const pct = parse(pctStr);
         const ttc = parse(thirdStr);
-        if (isFinite(ht)) {
-          const ttcVal = ht * 1.2;
-          const pctVal = purchase > 0 ? ((ht - purchase) / purchase) * 100 : 0;
-          setRetailPrice({ ht: fmt2(ht), margin: fmt2(pctVal), ttc: fmt2(ttcVal) });
-        } else if (isFinite(pct)) {
+
+        let newHT: number | undefined;
+        let newPct: number | undefined;
+        let newTTC: number | undefined;
+
+        const hasHT = isFinite(ht);
+        const hasPct = isFinite(pct);
+        const hasTTC = isFinite(ttc);
+        const htEmpty = (pStr ?? '').toString().trim() === '';
+        const pctEmpty = (pctStr ?? '').toString().trim() === '';
+        const ttcEmpty = (thirdStr ?? '').toString().trim() === '';
+
+        if (hasHT) {
+          if (ttcEmpty) {
+            newTTC = ht * 1.2;
+          }
+          if (pctEmpty) {
+            const pctVal = purchase > 0 ? ((ht - purchase) / purchase) * 100 : 0;
+            newPct = pctVal;
+          }
+        } else if (hasTTC) {
+          if (htEmpty) {
+            const htVal = ttc / 1.2;
+            newHT = htVal;
+            if (pctEmpty) {
+              const pctVal = purchase > 0 ? ((htVal - purchase) / purchase) * 100 : 0;
+              newPct = pctVal;
+            }
+          }
+        } else if (hasPct) {
+          // Si seule la marge est présente
           const htVal = purchase * (1 + pct / 100);
-          const ttcVal = htVal * 1.2;
-          setRetailPrice({ ht: fmt2(htVal), margin: fmt2(pct), ttc: fmt2(ttcVal) });
-        } else if (isFinite(ttc)) {
-          const htVal = ttc / 1.2;
-          const pctVal = purchase > 0 ? ((htVal - purchase) / purchase) * 100 : 0;
-          setRetailPrice({ ht: fmt2(htVal), margin: fmt2(pctVal), ttc: fmt2(ttc) });
+          if (htEmpty) newHT = htVal;
+          if (ttcEmpty) newTTC = htVal * 1.2;
+        }
+
+        if (newHT !== undefined || newPct !== undefined || newTTC !== undefined) {
+          setRetailPrice(prev => ({
+            ht: newHT !== undefined ? fmt2(newHT) : prev.ht,
+            margin: newPct !== undefined ? fmt2(newPct) : prev.margin,
+            ttc: newTTC !== undefined ? fmt2(newTTC) : prev.ttc
+          }));
         }
       }
     };
@@ -282,42 +350,109 @@ export const ProductForm: React.FC<ProductFormProps> = ({
     const fillPro = () => {
       const pStr = proPrice.ht;
       const pctStr = proPrice.margin;
-      const thirdStr = proPrice.ttc;
-      if (!onlyOneProvided(pStr, pctStr, thirdStr)) return;
+      const thirdStr = proPrice.ttc; // TVA normale: TTC; TVM: Marge nette €
 
       if (vat === 'margin') {
+        // TVM
         const price = parse(pStr);
         const pct = parse(pctStr);
         const net = parse(thirdStr);
-        if (isFinite(price)) {
-          const netVal = (price - purchase) / 1.2;
-          const pctVal = purchase > 0 ? (netVal / purchase) * 100 : 0;
-          setProPrice({ ht: fmt2(price), margin: fmt2(pctVal), ttc: fmt2(netVal) });
-        } else if (isFinite(pct)) {
-          const netVal = (purchase * pct) / 100;
-          const priceVal = purchase + netVal * 1.2;
-          setProPrice({ ht: fmt2(priceVal), margin: fmt2(pct), ttc: fmt2(netVal) });
-        } else if (isFinite(net)) {
-          const priceVal = purchase + net * 1.2;
-          const pctVal = purchase > 0 ? (net / purchase) * 100 : 0;
-          setProPrice({ ht: fmt2(priceVal), margin: fmt2(pctVal), ttc: fmt2(net) });
+
+        let newPrice: number | undefined;
+        let newPct: number | undefined;
+        let newNet: number | undefined;
+
+        const hasPrice = isFinite(price);
+        const hasPct = isFinite(pct);
+        const hasNet = isFinite(net);
+        const priceEmpty = (pStr ?? '').toString().trim() === '';
+        const pctEmpty = (pctStr ?? '').toString().trim() === '';
+        const netEmpty = (thirdStr ?? '').toString().trim() === '';
+
+        if (hasPrice) {
+          if (netEmpty) {
+            const netVal = (price - purchase) / 1.2;
+            newNet = netVal;
+          }
+          if (pctEmpty) {
+            const netVal = hasNet ? net : ((price - purchase) / 1.2);
+            const pctVal = purchase > 0 ? (netVal / purchase) * 100 : 0;
+            newPct = pctVal;
+          }
+        } else if (hasNet) {
+          if (priceEmpty) {
+            const priceVal = purchase + net * 1.2;
+            newPrice = priceVal;
+          }
+          if (pctEmpty) {
+            const pctVal = purchase > 0 ? (net / purchase) * 100 : 0;
+            newPct = pctVal;
+          }
+        } else if (hasPct) {
+          if (netEmpty) {
+            const netVal = (purchase * pct) / 100;
+            newNet = netVal;
+          }
+          if (priceEmpty) {
+            const baseNet = netEmpty ? (purchase * pct) / 100 : net;
+            const priceVal = purchase + baseNet * 1.2;
+            newPrice = priceVal;
+          }
+        }
+
+        if (newPrice !== undefined || newPct !== undefined || newNet !== undefined) {
+          setProPrice(prev => ({
+            ht: newPrice !== undefined ? fmt2(newPrice) : prev.ht,
+            margin: newPct !== undefined ? fmt2(newPct) : prev.margin,
+            ttc: newNet !== undefined ? fmt2(newNet) : prev.ttc
+          }));
         }
       } else {
+        // TVA normale
         const ht = parse(pStr);
         const pct = parse(pctStr);
         const ttc = parse(thirdStr);
-        if (isFinite(ht)) {
-          const ttcVal = ht * 1.2;
-          const pctVal = purchase > 0 ? ((ht - purchase) / purchase) * 100 : 0;
-          setProPrice({ ht: fmt2(ht), margin: fmt2(pctVal), ttc: fmt2(ttcVal) });
-        } else if (isFinite(pct)) {
+
+        let newHT: number | undefined;
+        let newPct: number | undefined;
+        let newTTC: number | undefined;
+
+        const hasHT = isFinite(ht);
+        const hasPct = isFinite(pct);
+        const hasTTC = isFinite(ttc);
+        const htEmpty = (pStr ?? '').toString().trim() === '';
+        const pctEmpty = (pctStr ?? '').toString().trim() === '';
+        const ttcEmpty = (thirdStr ?? '').toString().trim() === '';
+
+        if (hasHT) {
+          if (ttcEmpty) {
+            newTTC = ht * 1.2;
+          }
+          if (pctEmpty) {
+            const pctVal = purchase > 0 ? ((ht - purchase) / purchase) * 100 : 0;
+            newPct = pctVal;
+          }
+        } else if (hasTTC) {
+          if (htEmpty) {
+            const htVal = ttc / 1.2;
+            newHT = htVal;
+            if (pctEmpty) {
+              const pctVal = purchase > 0 ? ((htVal - purchase) / purchase) * 100 : 0;
+              newPct = pctVal;
+            }
+          }
+        } else if (hasPct) {
           const htVal = purchase * (1 + pct / 100);
-          const ttcVal = htVal * 1.2;
-          setProPrice({ ht: fmt2(htVal), margin: fmt2(pct), ttc: fmt2(ttcVal) });
-        } else if (isFinite(ttc)) {
-          const htVal = ttc / 1.2;
-          const pctVal = purchase > 0 ? ((htVal - purchase) / purchase) * 100 : 0;
-          setProPrice({ ht: fmt2(htVal), margin: fmt2(pctVal), ttc: fmt2(ttc) });
+          if (htEmpty) newHT = htVal;
+          if (ttcEmpty) newTTC = htVal * 1.2;
+        }
+
+        if (newHT !== undefined || newPct !== undefined || newTTC !== undefined) {
+          setProPrice(prev => ({
+            ht: newHT !== undefined ? fmt2(newHT) : prev.ht,
+            margin: newPct !== undefined ? fmt2(newPct) : prev.margin,
+            ttc: newTTC !== undefined ? fmt2(newTTC) : prev.ttc
+          }));
         }
       }
     };
@@ -381,6 +516,11 @@ export const ProductForm: React.FC<ProductFormProps> = ({
 
     if (name === 'description') {
       setFormData(prev => ({ ...prev, [name]: value }));
+      return;
+    }
+    // Forcer l'UPPERCASE pour les SKU dès la saisie
+    if (name === 'sku') {
+      setFormData(prev => ({ ...prev, sku: (value || '').toUpperCase() }));
       return;
     }
 
@@ -541,7 +681,7 @@ export const ProductForm: React.FC<ProductFormProps> = ({
 
               const serialProductData: any = {
                 name: initialProduct?.name,
-                sku: `${initialProduct?.sku}-${serial_number}`,
+                sku: `${(initialProduct?.sku || '').toUpperCase()}-${serial_number}`,
                 serial_number,
                 purchase_price_with_fees: parseFloat(purchase_price_with_fees),
                 retail_price: (vat_type || 'normal') === 'normal'
@@ -572,7 +712,7 @@ export const ProductForm: React.FC<ProductFormProps> = ({
               };
 
               // Vérifier doublon éventuel sur le SKU enfant avant insertion
-              const childSku = `${initialProduct?.sku}-${serial_number}`;
+              const childSku = `${(initialProduct?.sku || '').toUpperCase()}-${serial_number}`;
               const { data: existingChild } = await supabase
                 .from('products')
                 .select('id')
@@ -720,6 +860,10 @@ export const ProductForm: React.FC<ProductFormProps> = ({
         headers.forEach((header, index) => {
           product[header.trim()] = values[index]?.trim() || '';
         });
+        // Normaliser le SKU importé en UPPERCASE
+        if (typeof product.sku === 'string') {
+          product.sku = product.sku.toUpperCase();
+        }
         return product;
       });
 
@@ -1301,7 +1445,7 @@ export const ProductForm: React.FC<ProductFormProps> = ({
 
       const productData = {
         name: formData.name,
-        sku: formData.sku,
+        sku: (formData.sku || '').toUpperCase(),
         purchase_price_with_fees: parseFloat(formData.purchase_price_with_fees),
         retail_price: parseFloat(retailPrice.ht || '0'),
         pro_price: parseFloat(proPrice.ht || '0'),
@@ -1328,7 +1472,21 @@ export const ProductForm: React.FC<ProductFormProps> = ({
 
       if (initialProduct) {
         await updateProduct(initialProduct.id, productData);
-        
+
+        // Cascade: if parent stock_alert changed, propagate to mirror children (non serialized)
+        try {
+          const prevAlert = (initialProduct as any)?.stock_alert ?? null;
+          const nextAlert = Number.isFinite(parseInt(formData.stock_alert)) ? parseInt(formData.stock_alert) : null;
+          if (prevAlert !== nextAlert && !initialProduct.parent_id) {
+            await supabase
+              .from('products')
+              .update({ stock_alert: nextAlert } as any)
+              .eq('parent_id', initialProduct.id as any)
+              .is('serial_number', null);
+          }
+        } catch (e) {
+          console.error('Cascade update of stock_alert to mirror children failed:', e);
+        }
         
         if (onSubmitSuccess) {
           onSubmitSuccess();
