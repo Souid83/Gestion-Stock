@@ -86,6 +86,12 @@ async function checkAdminAccess(supabase: any): Promise<boolean> {
 }
 
 export const handler = async (event: NetlifyEvent, context: NetlifyContext): Promise<NetlifyResponse> => {
+  // RBAC bypass pour développement / sandbox
+  const RBAC_BYPASS = process.env.RBAC_DISABLED === 'true';
+  if (RBAC_BYPASS) {
+    console.log('⚙️ RBAC bypass activé pour eBay authorize');
+  }
+
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: {
       headers: {
@@ -103,7 +109,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     }
 
     const isAdmin = await checkAdminAccess(supabase);
-    if (!isAdmin) {
+    if (!isAdmin && !RBAC_BYPASS) {
       return {
         statusCode: 403,
         body: JSON.stringify({ error: 'forbidden' })
