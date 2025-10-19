@@ -32,6 +32,8 @@ import { InvoiceSettings } from './components/Billing/InvoiceSettings';
 import { RepairCalculator } from './pages/RepairCalculator';
 import { PriseEnCharge } from './pages/PriseEnCharge';
 import { supabase } from './lib/supabase';
+import MarketplacePricing from './pages/pricing';
+import EbaySettings from './pages/settings/ebay';
 import { QuickCalculator } from './components/Products/QuickCalculator';
 import { SalesChart } from './components/Dashboard/SalesChart';
 
@@ -320,6 +322,10 @@ function App() {
           return <RepairCalculator />;
         case 'atelier-prise-en-charge':
           return <PriseEnCharge />;
+        case 'marketplace-pricing':
+          return isAdminUser ? <MarketplacePricing /> : <div className="p-6 text-red-600">Accès non autorisé</div>;
+        case 'settings-ebay':
+          return isAdminUser ? <EbaySettings /> : <div className="p-6 text-red-600">Accès non autorisé</div>;
         default:
           return (
             <main className="bg-gray-50">
@@ -682,6 +688,13 @@ function App() {
                 >
                   Stock produits
                 </a>
+                <a
+                  href="#"
+                  onClick={() => setCurrentPage('marketplace-pricing')}
+                  className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
+                >
+                  Gestion prix marketplace
+                </a>
                 {isAdminUser && (
                   <>
                     <a
@@ -892,6 +905,13 @@ function App() {
                   className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
                 >
                   Réglages Facture
+                </a>
+                <a
+                  href="#"
+                  onClick={() => setCurrentPage('settings-ebay')}
+                  className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
+                >
+                  Réglages eBay (BYO)
                 </a>
               </div>
             )}
