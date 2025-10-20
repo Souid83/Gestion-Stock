@@ -8,8 +8,11 @@ export const handler = async (event) => {
     const url = new URL(event.rawUrl);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
-    if (!code) return { statusCode: 400, body: "Missing code" };
+    if (!code) {
+      return { statusCode: 400, body: "Missing code" };
+    }
 
+    // --- Variables d’environnement (Production) ---
     const clientId = process.env.EBAY_APP_ID;
     const clientSecret = process.env.EBAY_CERT_ID;
     const ruName = process.env.EBAY_RUNAME;
@@ -17,21 +20,32 @@ export const handler = async (event) => {
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+    console.log("🔐 Using eBay credentials:", {
+      clientId,
+      ruName,
+      env: process.env.EBAY_BASE_URL,
+    });
+
+    // --- Header Basic Auth ---
     const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+
+    // --- redirect complet obligatoire pour PROD ---
+    const redirectFull = `https://signin.ebay.com/ws/eBayISAPI.dll?SignIn&RuName=${ruName}`;
+
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
-      redirect_uri: ruName,
+      redirect_uri: redirectFull,
     }).toString();
 
-    console.log("🌐 Requesting token from eBay sandbox...");
+    console.log("🌐 Requesting token from eBay PRODUCTION...");
 
-    const response = await fetch("https://api.sandbox.ebay.com/identity/v1/oauth2/token", {
+    const response = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
       method: "POST",
       headers: {
-        "Authorization": `Basic ${auth}`,
+        Authorization: `Basic ${auth}`,
         "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
+        Accept: "application/json",
       },
       body,
     });
@@ -51,17 +65,25 @@ export const handler = async (event) => {
 
     const { access_token, refresh_token, expires_in, scope, token_type } = data;
 
+    // --- Chiffrement AES-GCM du refresh token ---
     const encryptToken = (token, secret) => {
       const iv = crypto.randomBytes(16);
       const key = crypto.scryptSync(secret, "salt", 32);
       const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
       const enc = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
       const tag = cipher.getAuthTag();
-      return JSON.stringify({ iv: iv.toString("hex"), tag: tag.toString("hex"), data: enc.toString("hex") });
+      return JSON.stringify({
+        iv: iv.toString("hex"),
+        tag: tag.toString("hex"),
+        data: enc.toString("hex"),
+      });
     };
 
-    const encryptedRefresh = refresh_token ? encryptToken(refresh_token, secretKey) : null;
+    const encryptedRefresh = refresh_token
+      ? encryptToken(refresh_token, secretKey)
+      : null;
 
+    // --- Insertion Supabase ---
     const supabase = createClient(supabaseUrl, supabaseKey);
     const { error } = await supabase.from("oauth_tokens").insert({
       access_token,
@@ -79,8 +101,14 @@ export const handler = async (event) => {
       return { statusCode: 500, body: JSON.stringify({ insert_error: error }) };
     }
 
-    console.log("✅ OAuth tokens stored OK");
-    return { statusCode: 302, headers: { Location: "/pricing?provider=ebay&connected=1" } };
+    console.log("✅ OAuth tokens stored successfully");
+
+    return {
+      statusCode: 302,
+      headers: {
+        Location: "https://dev-gestockflow.netlify.app/pricing?provider=ebay&connected=1",
+      },
+    };
   } catch (err) {
     console.error("🔥 Callback fatal error:", err);
     return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
