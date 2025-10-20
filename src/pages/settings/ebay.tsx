@@ -24,7 +24,28 @@ export default function EbaySettings() {
 
   useEffect(() => {
     checkAdminAccess();
+    loadFromLocalStorage();
   }, []);
+
+  const loadFromLocalStorage = () => {
+    console.log('📂 Loading eBay settings from localStorage');
+    const savedEnv = localStorage.getItem('ebay_env');
+    const savedClientId = localStorage.getItem('ebay_client_id');
+    const savedClientSecret = localStorage.getItem('ebay_client_secret');
+    const savedRuname = localStorage.getItem('ebay_runame');
+
+    if (savedEnv || savedClientId || savedClientSecret || savedRuname) {
+      setFormData({
+        environment: (savedEnv as 'sandbox' | 'production') || 'sandbox',
+        client_id: savedClientId || '',
+        client_secret: savedClientSecret || '',
+        runame: savedRuname || ''
+      });
+      console.log('✅ Loaded saved eBay settings:', { savedEnv, savedClientId, savedRuname });
+    } else {
+      console.log('ℹ️ No saved eBay settings found in localStorage');
+    }
+  };
 
   const checkAdminAccess = async () => {
     const adminAccess = await isAdmin();
@@ -61,6 +82,13 @@ export default function EbaySettings() {
     }
 
     setIsSubmitting(true);
+
+    console.log('💾 Saving eBay settings to localStorage');
+    localStorage.setItem('ebay_env', formData.environment);
+    localStorage.setItem('ebay_client_id', formData.client_id);
+    localStorage.setItem('ebay_client_secret', formData.client_secret);
+    localStorage.setItem('ebay_runame', formData.runame);
+    console.log('✅ eBay settings saved to localStorage');
 
     try {
       const response = await fetch('/.netlify/functions/ebay-authorize', {
