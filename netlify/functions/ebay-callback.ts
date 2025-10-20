@@ -30,7 +30,8 @@ export const handler = async (event) => {
     const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
 
     // --- redirect complet obligatoire pour PROD ---
-    const redirectFull = `https://signin.ebay.com/ws/eBayISAPI.dll?SignIn&RuName=${ruName}`;
+    const redirectFull = ruName;
+
 
     const body = new URLSearchParams({
       grant_type: "authorization_code",
