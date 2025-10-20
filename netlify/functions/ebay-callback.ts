@@ -86,7 +86,37 @@ export const handler = async (event) => {
 
     // --- Insertion Supabase ---
     const supabase = createClient(supabaseUrl, supabaseKey);
+
+    // --- Upsert marketplace_accounts ---
+    console.log("🔄 Upserting marketplace_accounts...");
+    const { data: accountData, error: accountError } = await supabase
+      .from("marketplace_accounts")
+      .upsert(
+        {
+          user_id: null,
+          provider: "ebay",
+          provider_account_id: clientId,
+          display_name: "eBay Production",
+          environment: "production",
+          is_active: true,
+          updated_at: new Date().toISOString(),
+        },
+        {
+          onConflict: "user_id,provider,environment,provider_account_id",
+        }
+      )
+      .select()
+      .single();
+
+    if (accountError) {
+      console.error("❌ marketplace_accounts upsert error:", accountError);
+      return { statusCode: 500, body: JSON.stringify({ account_error: accountError }) };
+    }
+
+    console.log("✅ marketplace_accounts upserted:", accountData);
+
     const { error } = await supabase.from("oauth_tokens").insert({
+      marketplace_account_id: accountData.id,
       access_token,
       refresh_token_encrypted: encryptedRefresh,
       scope,
