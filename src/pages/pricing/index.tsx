@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation, useNavigate } from "react-router-dom";
 import { Package, RefreshCw, Search } from 'lucide-react';
 import { isAdmin } from '../../lib/supabase';
 
@@ -79,6 +80,21 @@ export default function MarketplacePricing() {
   const [productIdInput, setProductIdInput] = useState('');
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const provider = params.get("provider");
+    const connected = params.get("connected");
+    if (provider === "ebay" && connected === "1") {
+      setToast({ message: 'Compte eBay connecté avec succès !', type: 'success' });
+      setTimeout(() => {
+        navigate("/pricing", { replace: true });
+      }, 2000);
+    }
+  }, [location, navigate]);
 
   // Guard RBAC : vérification admin au montage
   useEffect(() => {
