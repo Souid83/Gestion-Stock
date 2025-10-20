@@ -68,6 +68,11 @@ async function checkAdminAccess(supabase: any): Promise<boolean> {
 }
 
 export const handler = async (event: NetlifyEvent, context: NetlifyContext): Promise<NetlifyResponse> => {
+  const RBAC_BYPASS = process.env.RBAC_DISABLED === "true";
+  if (RBAC_BYPASS) {
+    console.log("⚙️ RBAC bypass activé pour marketplaces-accounts");
+  }
+
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: {
       headers: {
@@ -82,6 +87,19 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         statusCode: 405,
         body: JSON.stringify({ error: 'method_not_allowed' })
       };
+    }
+
+    if (RBAC_BYPASS) {
+      const { data, error } = await supabase
+        .from("marketplace_accounts")
+        .select("*")
+        .eq("provider", event.queryStringParameters?.provider)
+        .eq("is_active", true);
+      if (error) {
+        console.error("❌ Supabase error:", error);
+        return { statusCode: 500, body: JSON.stringify({ error }) };
+      }
+      return { statusCode: 200, body: JSON.stringify({ accounts: data }) };
     }
 
     const isAdmin = await checkAdminAccess(supabase);

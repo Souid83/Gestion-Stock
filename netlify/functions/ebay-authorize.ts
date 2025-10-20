@@ -169,7 +169,10 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         updated_at: new Date().toISOString()
       });
 
-    const authBaseUrl = environment === 'sandbox' ? EBAY_SANDBOX_AUTH_URL : EBAY_PRODUCTION_AUTH_URL;
+    const authBaseUrl = environment === 'sandbox'
+  ? EBAY_SANDBOX_AUTH_URL
+  : EBAY_PRODUCTION_AUTH_URL;
+
 
     const scopes = [
       'https://api.ebay.com/oauth/api_scope',
