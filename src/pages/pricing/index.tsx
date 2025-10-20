@@ -88,20 +88,13 @@ export default function MarketplacePricing() {
     const params = new URLSearchParams(location.search);
     const provider = params.get("provider");
     const connected = params.get("connected");
-    const page = params.get("page");
-
-    if ((provider === "ebay" && connected === "1") || page === "marketplace-pricing") {
-      setSelectedProvider("ebay");
-      setToast({ message: "Compte eBay connecté avec succès !", type: "success" });
-      const cleanUrl = new URL(window.location.href);
-      cleanUrl.searchParams.delete("provider");
-      cleanUrl.searchParams.delete("connected");
-      cleanUrl.searchParams.delete("page");
+    if (provider === "ebay" && connected === "1") {
+      setToast({ message: 'Compte eBay connecté avec succès !', type: 'success' });
       setTimeout(() => {
-        window.history.replaceState(null, "", cleanUrl.toString());
+        navigate("/pricing", { replace: true });
       }, 2000);
     }
-  }, [location]);
+  }, [location, navigate]);
 
   // Guard RBAC : vérification admin au montage
   useEffect(() => {

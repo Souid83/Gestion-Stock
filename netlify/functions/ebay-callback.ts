@@ -80,12 +80,7 @@ export const handler = async (event) => {
     }
 
     console.log("✅ OAuth tokens stored OK");
-    return {
-      statusCode: 302,
-      headers: {
-        Location: "https://dev-gestockflow.netlify.app/?page=marketplace-pricing&provider=ebay&connected=1"
-      }
-    };
+    return { statusCode: 302, headers: { Location: "/pricing?provider=ebay&connected=1" } };
   } catch (err) {
     console.error("🔥 Callback fatal error:", err);
     return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
