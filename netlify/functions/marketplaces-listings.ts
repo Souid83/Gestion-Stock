@@ -63,15 +63,17 @@ export const handler = async (event: any) => {
     return new TextDecoder().decode(decryptedBuffer);
   };
 
+  const JSON_HEADERS = { 'Content-Type': 'application/json' };
+
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-  const badRequest = (code: string) => ({ statusCode: 400, body: JSON.stringify({ error: code }) });
-  const srvError = (code: string, detail?: string) => ({ statusCode: 500, body: JSON.stringify({ error: code, detail }) });
+  const badRequest = (code: string) => ({ statusCode: 400, headers: JSON_HEADERS, body: JSON.stringify({ error: code }) });
+  const srvError = (code: string, detail?: string) => ({ statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error: code, detail }) });
 
   try {
     if (event.httpMethod !== 'GET') {
-      return { statusCode: 405, body: JSON.stringify({ error: 'method_not_allowed' }) };
+      return { statusCode: 405, headers: JSON_HEADERS, body: JSON.stringify({ error: 'method_not_allowed' }) };
     }
 
     const qs = event.queryStringParameters || {};
@@ -94,7 +96,7 @@ export const handler = async (event: any) => {
 
     if (accErr || !account) {
       console.error('❌ account_not_found', accErr);
-      return { statusCode: 404, body: JSON.stringify({ error: 'account_not_found' }) };
+      return { statusCode: 404, headers: JSON_HEADERS, body: JSON.stringify({ error: 'account_not_found' }) };
     }
     console.info('✅ Account found:', account.id);
 
@@ -109,7 +111,7 @@ export const handler = async (event: any) => {
 
     if (tokErr || !tokenRow) {
       console.error('❌ token_missing', tokErr);
-      return { statusCode: 424, body: JSON.stringify({ error: 'token_missing' }) };
+      return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing' }) };
     }
     console.info('✅ Token found');
 
@@ -215,7 +217,7 @@ export const handler = async (event: any) => {
 
       // Ensure we have a refresh token stored (encrypted) and client credentials
       if (!tokenRow.refresh_token_encrypted || !tokenRow.encryption_iv) {
-        return { statusCode: 424, body: JSON.stringify({ error: 'token_missing_refresh' }) };
+        return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing_refresh' }) };
       }
 
       // Resolve client credentials (from account or provider_app_credentials)
@@ -241,7 +243,7 @@ export const handler = async (event: any) => {
       }
 
       if (!clientId || !clientSecret) {
-        return { statusCode: 424, body: JSON.stringify({ error: 'token_missing_refresh' }) };
+        return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing_refresh' }) };
       }
 
       const refreshToken = await decryptData(tokenRow.refresh_token_encrypted, tokenRow.encryption_iv);
@@ -257,7 +259,7 @@ export const handler = async (event: any) => {
       });
 
       if (!refreshed?.access_token) {
-        return { statusCode: 401, body: JSON.stringify({ error: 'token_expired' }) };
+        return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_expired' }) };
       }
 
       // Update existing token row (unique per marketplace_account_id)
@@ -279,7 +281,7 @@ export const handler = async (event: any) => {
     }
 
     if (!inv.ok) {
-      return { statusCode: inv.status || 400, body: inv.raw || JSON.stringify({ error: 'inventory_fetch_failed' }) };
+      return { statusCode: inv.status || 400, headers: JSON_HEADERS, body: JSON.stringify({ error: 'inventory_fetch_failed', raw: typeof inv.raw === 'string' ? inv.raw.substring(0, 500) : undefined }) };
     }
 
     let skus = inv.skus || [];
@@ -353,6 +355,7 @@ export const handler = async (event: any) => {
 
     return {
       statusCode: 200,
+      headers: JSON_HEADERS,
       body: JSON.stringify({
         items,
         count: items.length,

@@ -83,10 +83,13 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
   });
   const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
+  const JSON_HEADERS = { 'Content-Type': 'application/json' };
+
   try {
     if (event.httpMethod !== 'GET') {
       return {
         statusCode: 405,
+        headers: JSON_HEADERS,
         body: JSON.stringify({ error: 'method_not_allowed' })
       };
     }
@@ -102,7 +105,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         .order('created_at', { ascending: false });
       if (error) {
         console.error("❌ Supabase error:", error);
-        return { statusCode: 500, body: JSON.stringify({ error }) };
+        return { statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error }) };
       }
 
       // Tokens: get latest per account_id (order desc, take first seen)
@@ -145,13 +148,14 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         });
       }
 
-      return { statusCode: 200, body: JSON.stringify({ accounts }) };
+      return { statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify({ accounts }) };
     }
 
     const isAdmin = await checkAdminAccess(supabase);
     if (!isAdmin) {
       return {
         statusCode: 403,
+        headers: JSON_HEADERS,
         body: JSON.stringify({ error: 'forbidden' })
       };
     }
@@ -166,6 +170,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       });
       return {
         statusCode: 400,
+        headers: JSON_HEADERS,
         body: JSON.stringify({ error: 'bad_request', hint: 'Provider parameter is required' })
       };
     }
@@ -185,6 +190,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       });
       return {
         statusCode: 500,
+        headers: JSON_HEADERS,
         body: JSON.stringify({ error: 'server_error' })
       };
     }
@@ -236,6 +242,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
 
     return {
       statusCode: 200,
+      headers: JSON_HEADERS,
       body: JSON.stringify({
         accounts: resultAccounts
       })
@@ -244,6 +251,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
   } catch (error: any) {
     return {
       statusCode: 500,
+      headers: JSON_HEADERS,
       body: JSON.stringify({ error: 'server_error' })
     };
   }
