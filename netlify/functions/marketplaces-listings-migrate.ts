@@ -184,6 +184,7 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
       }
       if (!clientId || !clientSecret) return null;
       const refreshToken = await decryptData(tokenRow.refresh_token_encrypted, tokenRow.encryption_iv);
+      console.log("🔐 Decrypted refresh token:", refreshToken);
       const refreshed = await refreshAccessToken({
         client_id: clientId,
         client_secret: clientSecret,
@@ -223,6 +224,7 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
           })
         );
 
+      console.log("🧩 Using tokenRow:", tokenRow);
       let resp = await doCall();
       let raw = await readText(resp);
 
