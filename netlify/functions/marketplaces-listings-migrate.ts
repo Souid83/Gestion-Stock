@@ -165,6 +165,12 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
     }
 
     const ensureRefreshedToken = async (): Promise<string | null> => {
+      if (!tokenRow.encryption_iv && tokenRow.refresh_token_encrypted?.includes('"iv"')) {
+        try {
+          const parsed = JSON.parse(tokenRow.refresh_token_encrypted);
+          tokenRow.encryption_iv = parsed.iv;
+        } catch {}
+      }
       if (!tokenRow.refresh_token_encrypted || !tokenRow.encryption_iv) return null;
       let clientId: string = account.client_id || '';
       let clientSecret: string = account.client_secret || '';
