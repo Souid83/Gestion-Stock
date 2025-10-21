@@ -189,8 +189,23 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
         }
       }
       if (!clientId || !clientSecret) return null;
-      const refreshToken = await decryptData(tokenRow.refresh_token_encrypted, tokenRow.encryption_iv);
-      console.log("🔐 Decrypted refresh token:", refreshToken);
+      let refreshToken: string;
+      if (tokenRow.refresh_token_encrypted?.includes('"iv"')) {
+        try {
+          const parsed = JSON.parse(tokenRow.refresh_token_encrypted as string);
+          const ivB = Buffer.from(parsed.iv, 'hex');
+          const ctB = Buffer.concat([
+            Buffer.from(parsed.data, 'hex'),
+            Buffer.from(parsed.tag, 'hex')
+          ]);
+          refreshToken = await decryptData(ctB.toString('base64'), ivB.toString('base64'));
+        } catch (e) {
+          return null;
+        }
+      } else {
+        refreshToken = await decryptData(tokenRow.refresh_token_encrypted, tokenRow.encryption_iv);
+      }
+      
       const refreshed = await refreshAccessToken({
         client_id: clientId,
         client_secret: clientSecret,
