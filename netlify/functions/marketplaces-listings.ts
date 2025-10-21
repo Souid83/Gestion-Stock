@@ -215,6 +215,35 @@ export const handler = async (event: any) => {
     if (!inv.ok && inv.status === 401) {
       console.warn('⚠️ Inventory 401 — attempting refresh');
 
+      // Normalize legacy JSON {iv, tag, data} → base64 (ciphertext||tag) + iv, then persist
+      if (!tokenRow.encryption_iv && typeof tokenRow.refresh_token_encrypted === 'string' && tokenRow.refresh_token_encrypted.includes('"iv"')) {
+        try {
+          const legacy = JSON.parse(tokenRow.refresh_token_encrypted as string);
+          const ivB = Buffer.from(legacy.iv, 'hex');
+          const ctB = Buffer.concat([Buffer.from(legacy.data, 'hex'), Buffer.from(legacy.tag, 'hex')]);
+          const ivBase64 = ivB.toString('base64');
+          const ctBase64 = ctB.toString('base64');
+          try {
+            await decryptData(ctBase64, ivBase64);
+            await supabaseService
+              .from('oauth_tokens')
+              .update({
+                refresh_token_encrypted: ctBase64,
+                encryption_iv: ivBase64,
+                updated_at: new Date().toISOString()
+              })
+              .eq('marketplace_account_id', account_id);
+            (tokenRow as any).refresh_token_encrypted = ctBase64;
+            (tokenRow as any).encryption_iv = ivBase64;
+            console.log('🔁 Normalized legacy refresh token to base64 + iv and persisted');
+          } catch (e) {
+            console.warn('⚠️ Legacy token normalize decrypt failed, skipping persist:', (e as any)?.message || e);
+          }
+        } catch {
+          // ignore JSON parse errors
+        }
+      }
+
       // Ensure we have a refresh token stored (encrypted) and client credentials
       if (!tokenRow.refresh_token_encrypted || !tokenRow.encryption_iv) {
         return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing_refresh' }) };

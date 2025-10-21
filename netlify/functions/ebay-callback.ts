@@ -1,7 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 
-export const handler = async (event) => {
+export const handler = async (event: any) => {
   console.log("🟢 eBay Callback triggered");
 
   try {
@@ -30,7 +30,10 @@ export const handler = async (event) => {
     const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
 
     // --- redirect complet obligatoire pour PROD ---
-    const redirectFull = ruName;
+    if (!ruName) {
+      return { statusCode: 500, body: JSON.stringify({ error: "missing_runame" }) };
+    }
+    const redirectFull: string = ruName;
 
 
     const body = new URLSearchParams({
@@ -66,26 +69,40 @@ export const handler = async (event) => {
 
     const { access_token, refresh_token, expires_in, scope, token_type } = data;
 
-    // --- Chiffrement AES-GCM du refresh token ---
-    const encryptToken = (token, secret) => {
-      const iv = crypto.randomBytes(16);
-      const key = crypto.scryptSync(secret, "salt", 32);
-      const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-      const enc = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
-      const tag = cipher.getAuthTag();
-      return JSON.stringify({
-        iv: iv.toString("hex"),
-        tag: tag.toString("hex"),
-        data: enc.toString("hex"),
-      });
+    // --- Chiffrement AES-GCM (WebCrypto) du refresh token ---
+    const encryptData = async (data: string): Promise<{ encrypted: string; iv: string }> => {
+      if (!secretKey) {
+        throw new Error("SECRET_KEY not configured");
+      }
+      const keyBuffer = Buffer.from(secretKey, "base64");
+      const cryptoKey = await globalThis.crypto.subtle.importKey(
+        "raw",
+        keyBuffer,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt"]
+      );
+      const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+      const encryptedBuffer = await globalThis.crypto.subtle.encrypt(
+        { name: "AES-GCM", iv },
+        cryptoKey,
+        new TextEncoder().encode(data)
+      );
+      return {
+        encrypted: Buffer.from(encryptedBuffer).toString("base64"),
+        iv: Buffer.from(iv).toString("base64"),
+      };
     };
 
     const encryptedRefresh = refresh_token
-      ? encryptToken(refresh_token, secretKey)
+      ? await encryptData(refresh_token)
       : null;
 
     // --- Insertion Supabase ---
-    const supabase = createClient(supabaseUrl, supabaseKey);
+    if (!supabaseUrl || !supabaseKey) {
+      return { statusCode: 500, body: JSON.stringify({ error: "missing_supabase_env" }) };
+    }
+    const supabase = createClient(supabaseUrl as string, supabaseKey as string);
 
     // --- Upsert marketplace_accounts ---
     console.log("🔄 Upserting marketplace_accounts...");
@@ -118,7 +135,8 @@ export const handler = async (event) => {
     const { error } = await supabase.from("oauth_tokens").insert({
       marketplace_account_id: accountData.id,
       access_token,
-      refresh_token_encrypted: encryptedRefresh,
+      refresh_token_encrypted: encryptedRefresh ? encryptedRefresh.encrypted : null,
+      encryption_iv: encryptedRefresh ? encryptedRefresh.iv : null,
       scope,
       token_type,
       expires_at: new Date(Date.now() + (expires_in || 7200) * 1000).toISOString(),
@@ -140,7 +158,7 @@ export const handler = async (event) => {
         Location: "https://dev-gestockflow.netlify.app/pricing?provider=ebay&connected=1",
       },
     };
-  } catch (err) {
+  } catch (err: any) {
     console.error("🔥 Callback fatal error:", err);
     return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
   }

@@ -272,7 +272,37 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     const expiresAt = new Date(tokenRow.expires_at);
 
     if (now >= expiresAt) {
-      if (!tokenRow.refresh_token_encrypted || !tokenRow.encryption_iv) {
+      // Fallback normalization for legacy JSON {iv, tag, data} → base64 (ciphertext || tag) + iv, then persist
+  if (!tokenRow.encryption_iv && tokenRow.refresh_token_encrypted?.includes('"iv"')) {
+    try {
+      const legacy = JSON.parse(tokenRow.refresh_token_encrypted as string);
+      const ivB = Buffer.from(legacy.iv, 'hex');
+      const ctB = Buffer.concat([Buffer.from(legacy.data, 'hex'), Buffer.from(legacy.tag, 'hex')]);
+      const ivBase64 = ivB.toString('base64');
+      const ctBase64 = ctB.toString('base64');
+      // Validate decryption to ensure correctness before persisting
+      try {
+        await decryptData(ctBase64, ivBase64);
+        await supabase
+          .from('oauth_tokens')
+          .update({
+            refresh_token_encrypted: ctBase64,
+            encryption_iv: ivBase64,
+            updated_at: new Date().toISOString()
+          })
+          .eq('marketplace_account_id', account_id);
+        tokenRow.refresh_token_encrypted = ctBase64;
+        tokenRow.encryption_iv = ivBase64;
+        console.log('🔁 Normalized legacy refresh token to base64 + iv and persisted');
+      } catch (e) {
+        console.warn('⚠️ Legacy token normalize decrypt failed, skipping persist:', (e as any)?.message || e);
+      }
+    } catch {
+      // ignore JSON parse errors
+    }
+  }
+
+  if (!tokenRow.refresh_token_encrypted || !tokenRow.encryption_iv) {
         await logToSyncLogs(supabase, {
           marketplace_account_id: account_id,
           operation: 'oauth_test',
