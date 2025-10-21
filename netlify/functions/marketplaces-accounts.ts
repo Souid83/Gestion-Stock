@@ -106,10 +106,11 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       }
 
       // Tokens: get latest per account_id (order desc, take first seen)
+      const ids = (data || []).map(a => a && a.id).filter(Boolean);
       const { data: tokens } = await supabaseService
         .from('oauth_tokens')
-        .select('marketplace_account_id, created_at, provider, access_token')
-        .eq('provider', providerRBAC)
+        .select('marketplace_account_id, created_at, access_token')
+        .in('marketplace_account_id', ids)
         .neq('access_token', 'pending')
         .order('created_at', { ascending: false });
 
@@ -189,10 +190,11 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     }
 
     // Fetch latest tokens per account_id and build hasToken set
+    const acctIds = (accounts || []).map(a => a && a.id).filter(Boolean);
     const { data: tokens } = await supabaseService
       .from('oauth_tokens')
-      .select('marketplace_account_id, created_at, provider, access_token')
-      .eq('provider', provider)
+      .select('marketplace_account_id, created_at, access_token')
+      .in('marketplace_account_id', acctIds)
       .neq('access_token', 'pending')
       .order('created_at', { ascending: false });
 

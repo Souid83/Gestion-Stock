@@ -49,6 +49,19 @@ export const handler = async (event: any) => {
   const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
   const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
   const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const SECRET_KEY = process.env.SECRET_KEY || '';
+
+  const decryptData = async (encrypted: string, iv: string): Promise<string> => {
+    if (!SECRET_KEY) {
+      throw new Error('SECRET_KEY not configured');
+    }
+    const keyBuffer = Buffer.from(SECRET_KEY, 'base64');
+    const cryptoKey = await crypto.subtle.importKey('raw', keyBuffer, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    const encryptedBuffer = Buffer.from(encrypted, 'base64');
+    const ivBuffer = Buffer.from(iv, 'base64');
+    const decryptedBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuffer }, cryptoKey, encryptedBuffer);
+    return new TextDecoder().decode(decryptedBuffer);
+  };
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
@@ -89,9 +102,7 @@ export const handler = async (event: any) => {
       .from('oauth_tokens')
       .select('*')
       .eq('marketplace_account_id', account_id)
-      .eq('provider', 'ebay')
       .neq('access_token', 'pending')
-      .not('refresh_token', 'is', null)
       .order('updated_at', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -201,34 +212,70 @@ export const handler = async (event: any) => {
 
     if (!inv.ok && inv.status === 401) {
       console.warn('⚠️ Inventory 401 — attempting refresh');
-      if (tokenRow.refresh_token && account.client_id && account.client_secret) {
-        const refreshed = await refreshAccessToken({
-          client_id: account.client_id,
-          client_secret: account.client_secret,
-          refresh_token: tokenRow.refresh_token,
-          scopes: (Array.isArray(tokenRow.scopes) && tokenRow.scopes.length > 0)
-            ? tokenRow.scopes.join(' ')
-            : 'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
-          environment: account.environment === 'sandbox' ? 'sandbox' : 'production'
-        });
 
-        if (refreshed && refreshed.access_token) {
-          await supabaseService.from('oauth_tokens').insert({
-            marketplace_account_id: account_id,
-            provider: 'ebay',
-            access_token: refreshed.access_token,
-            refresh_token: tokenRow.refresh_token,
-            expires_in: refreshed.expires_in || null,
-            scopes: tokenRow.scopes || null
-          });
-          accessToken = refreshed.access_token;
-          inv = await fetchInventoryItems(accessToken);
-        } else {
-          return { statusCode: 401, body: JSON.stringify({ error: 'token_expired' }) };
+      // Ensure we have a refresh token stored (encrypted) and client credentials
+      if (!tokenRow.refresh_token_encrypted || !tokenRow.encryption_iv) {
+        return { statusCode: 424, body: JSON.stringify({ error: 'token_missing_refresh' }) };
+      }
+
+      // Resolve client credentials (from account or provider_app_credentials)
+      let clientId: string = account.client_id || '';
+      let clientSecret: string = account.client_secret || '';
+
+      if (!clientId || !clientSecret) {
+        const { data: credentials } = await supabaseService
+          .from('provider_app_credentials')
+          .select('*')
+          .eq('provider', 'ebay')
+          .eq('environment', account.environment === 'sandbox' ? 'sandbox' : 'production')
+          .maybeSingle();
+
+        if (credentials) {
+          try {
+            clientId = await decryptData(credentials.client_id_encrypted, credentials.encryption_iv);
+            clientSecret = await decryptData(credentials.client_secret_encrypted, credentials.encryption_iv);
+          } catch {
+            // fall through to error below if still missing
+          }
         }
-      } else {
+      }
+
+      if (!clientId || !clientSecret) {
+        return { statusCode: 424, body: JSON.stringify({ error: 'token_missing_refresh' }) };
+      }
+
+      const refreshToken = await decryptData(tokenRow.refresh_token_encrypted, tokenRow.encryption_iv);
+
+      const refreshed = await refreshAccessToken({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+        scopes: (typeof tokenRow.scope === 'string' && tokenRow.scope)
+          ? tokenRow.scope
+          : 'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
+        environment: account.environment === 'sandbox' ? 'sandbox' : 'production'
+      });
+
+      if (!refreshed?.access_token) {
         return { statusCode: 401, body: JSON.stringify({ error: 'token_expired' }) };
       }
+
+      // Update existing token row (unique per marketplace_account_id)
+      const updateData: any = {
+        access_token: refreshed.access_token,
+        updated_at: new Date().toISOString()
+      };
+      if (refreshed.expires_in) {
+        updateData.expires_at = new Date(Date.now() + (refreshed.expires_in * 1000)).toISOString();
+      }
+
+      await supabaseService
+        .from('oauth_tokens')
+        .update(updateData)
+        .eq('marketplace_account_id', account_id);
+
+      accessToken = refreshed.access_token;
+      inv = await fetchInventoryItems(accessToken);
     }
 
     if (!inv.ok) {
