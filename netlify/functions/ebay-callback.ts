@@ -1,6 +1,5 @@
 export const handler = async (event) => {
   const { createClient } = await import('@supabase/supabase-js');
-
   try {
     if (event.httpMethod !== 'GET') {
       return { statusCode: 405, body: JSON.stringify({ error: 'method_not_allowed' }) };
@@ -40,7 +39,7 @@ export const handler = async (event) => {
     const body = new URLSearchParams();
     body.set('grant_type', 'authorization_code');
     body.set('code', code);
-    body.set('redirect_uri', account.runame); // RUName EXACT
+    body.set('redirect_uri', account.runame);
 
     const resp = await fetch(tokenEndpoint, {
       method: 'POST',
@@ -73,7 +72,8 @@ export const handler = async (event) => {
       return { statusCode: 302, headers: { Location: '/pricing?provider=ebay&connected=0&reason=no_access_token' }, body: '' };
     }
 
-    await supabaseService.from('oauth_tokens').insert({
+    // Insérer ou mettre à jour le token
+    const inserted = await supabaseService.from('oauth_tokens').upsert({
       marketplace_account_id: account.id,
       provider: 'ebay',
       environment: isSandbox ? 'sandbox' : 'production',
@@ -81,11 +81,14 @@ export const handler = async (event) => {
       refresh_token: refresh_token || null,
       expires_in,
       scopes: scope || null
-    });
+    }, { onConflict: ['marketplace_account_id', 'provider'] });
 
-    const connectedFlag = refresh_token ? '1' : '0';
-    const reason = refresh_token ? '' : '&reason=token_missing_refresh';
-    return { statusCode: 302, headers: { Location: `/pricing?provider=ebay&connected=${connectedFlag}${reason}` }, body: '' };
+    if (refresh_token) {
+      return { statusCode: 302, headers: { Location: `/pricing?provider=ebay&connected=1` }, body: '' };
+    } else {
+      return { statusCode: 302, headers: { Location: `/pricing?provider=ebay&connected=0&reason=token_missing_refresh` }, body: '' };
+    }
+
   } catch (err) {
     console.error('callback_fatal', err?.message || err);
     return { statusCode: 500, body: JSON.stringify({ error: 'callback_server_error', detail: err?.message || 'unknown' }) };
