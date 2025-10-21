@@ -23,6 +23,7 @@ interface NetlifyResponse {
 
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 interface MarketplaceAccount {
   id: string;
@@ -80,6 +81,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       }
     }
   });
+  const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
   try {
     if (event.httpMethod !== 'GET') {
@@ -90,16 +92,48 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     }
 
     if (RBAC_BYPASS) {
+      const providerRBAC = (event.queryStringParameters?.provider || 'ebay').toLowerCase();
+
       const { data, error } = await supabase
         .from("marketplace_accounts")
         .select("*")
-        .eq("provider", event.queryStringParameters?.provider)
+        .eq("provider", providerRBAC)
         .eq("is_active", true);
       if (error) {
         console.error("❌ Supabase error:", error);
         return { statusCode: 500, body: JSON.stringify({ error }) };
       }
-      return { statusCode: 200, body: JSON.stringify({ accounts: data }) };
+
+      // Tokens: get latest per account_id (order desc, take first seen)
+      const { data: tokens } = await supabaseService
+        .from('oauth_tokens')
+        .select('marketplace_account_id, created_at, provider')
+        .eq('provider', providerRBAC)
+        .order('created_at', { ascending: false });
+
+      const hasToken = new Set<string>();
+      (tokens || []).forEach(t => {
+        if (t && t.marketplace_account_id && !hasToken.has(t.marketplace_account_id)) {
+          hasToken.add(t.marketplace_account_id);
+        }
+      });
+
+      // Deduplicate by account id and add connected flag
+      const map = new Map<string, any>();
+      for (const a of (data || [])) {
+        if (!a || !a.id) continue;
+        if (!map.has(a.id)) {
+          map.set(a.id, {
+            id: a.id,
+            display_name: a.display_name,
+            environment: a.environment,
+            provider_account_id: a.provider_account_id,
+            connected: hasToken.has(a.id)
+          });
+        }
+      }
+      const accounts = Array.from(map.values());
+      return { statusCode: 200, body: JSON.stringify({ accounts }) };
     }
 
     const isAdmin = await checkAdminAccess(supabase);
@@ -143,15 +177,45 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       };
     }
 
+    // Fetch latest tokens per account_id and build hasToken set
+    const { data: tokens } = await supabaseService
+      .from('oauth_tokens')
+      .select('marketplace_account_id, created_at, provider')
+      .eq('provider', provider)
+      .order('created_at', { ascending: false });
+
+    const hasToken = new Set<string>();
+    (tokens || []).forEach(t => {
+      if (t && t.marketplace_account_id && !hasToken.has(t.marketplace_account_id)) {
+        hasToken.add(t.marketplace_account_id);
+      }
+    });
+
+    // Deduplicate by id and add connected flag
+    const map = new Map<string, any>();
+    for (const a of (accounts || [])) {
+      if (!a || !a.id) continue;
+      if (!map.has(a.id)) {
+        map.set(a.id, {
+          id: a.id,
+          display_name: a.display_name,
+          environment: a.environment,
+          provider_account_id: a.provider_account_id,
+          connected: hasToken.has(a.id)
+        });
+      }
+    }
+    const resultAccounts = Array.from(map.values());
+
     await logToSyncLogs(supabase, provider, 'accounts_list', 'ok', {
       http_status: 200,
-      message: `Retrieved ${accounts?.length || 0} accounts`
+      message: `Retrieved ${resultAccounts.length} accounts`
     });
 
     return {
       statusCode: 200,
       body: JSON.stringify({
-        accounts: accounts || []
+        accounts: resultAccounts
       })
     };
 

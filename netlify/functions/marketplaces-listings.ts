@@ -4,9 +4,9 @@ const MAX_SKUS_PER_RUN = parseInt(process.env.EBAY_MAX_SKUS_PER_RUN || '300', 10
 const CONCURRENCY = Math.min(parseInt(process.env.EBAY_CONCURRENCY || '3', 10), 10);
 const BATCH_DELAY_MS = parseInt(process.env.EBAY_BATCH_DELAY_MS || '250', 10);
 
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
-const fetchWithRetry = async (fetchFn, maxRetries = 3) => {
+const fetchWithRetry = async (fetchFn: () => Promise<any>, maxRetries = 3): Promise<any> => {
   const delays = [500, 1000, 2000];
   let lastError;
 
@@ -41,7 +41,7 @@ const fetchWithRetry = async (fetchFn, maxRetries = 3) => {
   throw lastError || new Error('fetchWithRetry_failed');
 };
 
-export const handler = async (event) => {
+export const handler = async (event: any) => {
   const { createClient } = await import('@supabase/supabase-js');
 
   console.info('🚀 marketplaces-listings (offers) triggered');
@@ -53,8 +53,8 @@ export const handler = async (event) => {
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-  const badRequest = (code) => ({ statusCode: 400, body: JSON.stringify({ error: code }) });
-  const srvError = (code, detail) => ({ statusCode: 500, body: JSON.stringify({ error: code, detail }) });
+  const badRequest = (code: string) => ({ statusCode: 400, body: JSON.stringify({ error: code }) });
+  const srvError = (code: string, detail?: string) => ({ statusCode: 500, body: JSON.stringify({ error: code, detail }) });
 
   try {
     if (event.httpMethod !== 'GET') {
@@ -76,7 +76,6 @@ export const handler = async (event) => {
       .select('*')
       .eq('id', account_id)
       .eq('provider', 'ebay')
-      .eq('environment', 'production')
       .eq('is_active', true)
       .maybeSingle();
 
@@ -100,26 +99,39 @@ export const handler = async (event) => {
     }
     console.info('✅ Token found');
 
-    const host = 'https://api.ebay.com';
-    const authHeaders = (token) => ({
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json'
-    });
+    const host = account.environment === 'sandbox' ? 'https://api.sandbox.ebay.com' : 'https://api.ebay.com';
+    const authHeaders = (token: string, acceptLang?: string): Record<string, string> => {
+      const h: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
+      if (acceptLang) h['Accept-Language'] = acceptLang;
+      return h;
+    };
 
-    const readText = async (resp) => { try { return await resp.text(); } catch { return ''; } };
-    const parseJsonSafe = (txt) => { try { return JSON.parse(txt); } catch { return null; } };
+    const readText = async (resp: Response): Promise<string> => { try { return await resp.text(); } catch { return ''; } };
+    const parseJsonSafe = (txt: string): any => { try { return JSON.parse(txt); } catch { return null; } };
 
-    const fetchInventoryItems = async (token) => {
+    const fetchInventoryItems = async (token: string) => {
       const url = new URL('/sell/inventory/v1/inventory_item', host);
       url.searchParams.set('limit', String(limit));
       url.searchParams.set('offset', String(offset));
       console.info('🔄 Fetching inventory items:', url.toString());
 
       return fetchWithRetry(async () => {
-        const resp = await fetch(url.toString(), { method: 'GET', headers: authHeaders(token) });
-        const raw = await readText(resp);
+        let resp = await fetch(url.toString(), { method: 'GET', headers: authHeaders(token) });
+        let raw = await readText(resp);
 
         if (resp.status === 401) return { ok: false, status: 401, raw };
+
+        // 25709 → retry with en-US then fr-FR
+        if (!resp.ok && resp.status === 400 && raw.includes('"errorId":25709')) {
+          console.warn('🔁 25709 on inventory: retrying with en-US');
+          resp = await fetch(url.toString(), { method: 'GET', headers: authHeaders(token, 'en-US') });
+          raw = await readText(resp);
+          if (!resp.ok && resp.status === 400 && raw.includes('"errorId":25709')) {
+            console.warn('🔁 25709 persists: retrying with fr-FR');
+            resp = await fetch(url.toString(), { method: 'GET', headers: authHeaders(token, 'fr-FR') });
+            raw = await readText(resp);
+          }
+        }
 
         if (!resp.ok) {
           console.error('❌ inventory_items_error', raw);
@@ -133,22 +145,32 @@ export const handler = async (event) => {
         }
 
         const items = Array.isArray(json.inventoryItems) ? json.inventoryItems : [];
-        const skus = items.map(it => it && (it.sku || it.SKU || it.Sku)).filter(Boolean);
+        const skus = items.map((it: any) => it && (it.sku || it.SKU || it.Sku)).filter(Boolean);
         console.info('📦 Inventory SKUs found:', skus.length);
 
         return { ok: true, skus, total: json.total || skus.length };
       });
     };
 
-    const fetchOffersBySku = async (token, sku) => {
+    const fetchOffersBySku = async (token: string, sku: string) => {
       const url = new URL('/sell/inventory/v1/offer', host);
       url.searchParams.set('sku', sku);
       url.searchParams.set('limit', String(maxOffersPerSku));
       url.searchParams.set('offset', '0');
 
       return fetchWithRetry(async () => {
-        const resp = await fetch(url.toString(), { method: 'GET', headers: authHeaders(token) });
-        const raw = await readText(resp);
+        let resp = await fetch(url.toString(), { method: 'GET', headers: authHeaders(token) });
+        let raw = await readText(resp);
+
+        // 25709 → retry with en-US then fr-FR
+        if (!resp.ok && resp.status === 400 && raw.includes('"errorId":25709')) {
+          resp = await fetch(url.toString(), { method: 'GET', headers: authHeaders(token, 'en-US') });
+          raw = await readText(resp);
+          if (!resp.ok && resp.status === 400 && raw.includes('"errorId":25709')) {
+            resp = await fetch(url.toString(), { method: 'GET', headers: authHeaders(token, 'fr-FR') });
+            raw = await readText(resp);
+          }
+        }
 
         if (resp.status === 400 && raw.includes('"errorId":25707')) {
           console.warn('⚠️ invalid_sku_25707, skipping SKU:', sku);
@@ -183,7 +205,8 @@ export const handler = async (event) => {
           refresh_token: tokenRow.refresh_token,
           scopes: (Array.isArray(tokenRow.scopes) && tokenRow.scopes.length > 0)
             ? tokenRow.scopes.join(' ')
-            : 'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly'
+            : 'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
+          environment: account.environment === 'sandbox' ? 'sandbox' : 'production'
         });
 
         if (refreshed && refreshed.access_token) {
@@ -290,14 +313,30 @@ export const handler = async (event) => {
         retries: totalRetries
       })
     };
-  } catch (err) {
+  } catch (err: any) {
     console.error('🔥 fatal', err);
     return srvError('server_error', err && err.message ? err.message : 'unknown');
   }
 };
 
-async function refreshAccessToken({ client_id, client_secret, refresh_token, scopes }) {
-  const endpoint = 'https://api.ebay.com/identity/v1/oauth2/token';
+async function refreshAccessToken(
+  {
+    client_id,
+    client_secret,
+    refresh_token,
+    scopes,
+    environment = 'production'
+  }: {
+    client_id: string;
+    client_secret: string;
+    refresh_token: string;
+    scopes?: string;
+    environment?: 'sandbox' | 'production';
+  }
+) {
+  const endpoint = environment === 'sandbox'
+    ? 'https://api.sandbox.ebay.com/identity/v1/oauth2/token'
+    : 'https://api.ebay.com/identity/v1/oauth2/token';
 
   try {
     const basic = Buffer.from(`${client_id}:${client_secret}`).toString('base64');
@@ -333,7 +372,7 @@ async function refreshAccessToken({ client_id, client_secret, refresh_token, sco
       token_type: json.token_type || null,
       scope: json.scope || null
     };
-  } catch (e) {
+  } catch (e: any) {
     console.error('❌ refresh_access_token_exception', e && e.message ? e.message : e);
     return null;
   }
