@@ -114,7 +114,7 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
     }
 
     const qs = event.queryStringParameters || {};
-    const account_id = qs.account_id;
+    const account_id = (qs.account_id || '').trim();
     if (!account_id) {
       return { statusCode: 400, headers: JSON_HEADERS, body: JSON.stringify({ error: 'missing_account_id' }) };
     }
@@ -153,14 +153,17 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
     }
 
     // Token row
-    const { data: tokenRow, error: tokErr } = await supabaseService
+    const { data: tokenRows, error: tokErr } = await supabaseService
       .from('oauth_tokens')
       .select('*')
+      .eq('provider', 'ebay')
       .eq('marketplace_account_id', account_id)
       .neq('access_token', 'pending')
       .order('updated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .order('created_at', { ascending: false })
+      .range(0, 0); // prend uniquement la première ligne
+
+    const tokenRow = Array.isArray(tokenRows) ? tokenRows[0] : null;
 
     if (tokErr || !tokenRow) {
       return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing' }) };
