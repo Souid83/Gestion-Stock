@@ -361,14 +361,19 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     }
 
     console.log('🌐 Calling eBay Inventory API...');
-    const ebayApiUrl = 'https://api.ebay.com/sell/inventory/v1/inventory_item?limit=50';
+const ebayApiUrl = 'https://api.ebay.com/sell/inventory/v1/inventory_item?limit=50';
 
-    let response = await fetch(ebayApiUrl, {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
-      }
-    });
+response = await fetch(ebayApiUrl, {
+  method: 'GET',
+  headers: {
+    'Authorization': `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Accept-Language': 'en-US'
+  }
+});
+
+
 
     console.log(`📥 eBay API response status: ${response.status}`);
 
