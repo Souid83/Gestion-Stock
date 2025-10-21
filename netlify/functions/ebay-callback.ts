@@ -1,142 +1,93 @@
-import { createClient } from "@supabase/supabase-js";
-import crypto from "crypto";
-
 export const handler = async (event) => {
-  console.log("🟢 eBay Callback triggered");
+  const { createClient } = await import('@supabase/supabase-js');
 
   try {
-    const url = new URL(event.rawUrl);
-    const code = url.searchParams.get("code");
-    const state = url.searchParams.get("state");
-    if (!code) {
-      return { statusCode: 400, body: "Missing code" };
+    if (event.httpMethod !== 'GET') {
+      return { statusCode: 405, body: JSON.stringify({ error: 'method_not_allowed' }) };
     }
 
-    // --- Variables d’environnement (Production) ---
-    const clientId = process.env.EBAY_APP_ID;
-    const clientSecret = process.env.EBAY_CERT_ID;
-    const ruName = process.env.EBAY_RUNAME;
-    const secretKey = process.env.SECRET_KEY || "";
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
+    const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
+    const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-    console.log("🔐 Using eBay credentials:", {
-      clientId,
-      ruName,
-      env: process.env.EBAY_BASE_URL,
-    });
+    const qs = event.queryStringParameters || {};
+    const code = qs.code;
+    const account_id = qs.state || qs.account_id;
+    if (!code || !account_id) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'missing_code_or_state' }) };
+    }
 
-    // --- Header Basic Auth ---
-    const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+    const { data: account, error: accErr } = await supabaseService
+      .from('marketplace_accounts')
+      .select('id, provider, environment, client_id, client_secret, runame, is_active')
+      .eq('id', account_id)
+      .eq('provider', 'ebay')
+      .eq('is_active', true)
+      .maybeSingle();
 
-    // --- redirect complet obligatoire pour PROD ---
-    const redirectFull = ruName;
+    if (accErr || !account || !account.client_id || !account.client_secret || !account.runame) {
+      return { statusCode: 404, body: JSON.stringify({ error: 'account_or_secrets_not_found' }) };
+    }
 
+    const isSandbox = account.environment === 'sandbox';
+    const tokenEndpoint = isSandbox
+      ? 'https://api.sandbox.ebay.com/identity/v1/oauth2/token'
+      : 'https://api.ebay.com/identity/v1/oauth2/token';
 
-    const body = new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectFull,
-    }).toString();
+    const basic = Buffer.from(`${account.client_id}:${account.client_secret}`).toString('base64');
+    const body = new URLSearchParams();
+    body.set('grant_type', 'authorization_code');
+    body.set('code', code);
+    body.set('redirect_uri', account.runame); // RUName EXACT
 
-    console.log("🌐 Requesting token from eBay PRODUCTION...");
-
-    const response = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
-      method: "POST",
+    const resp = await fetch(tokenEndpoint, {
+      method: 'POST',
       headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json",
+        Authorization: `Basic ${basic}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
       },
-      body,
+      body: body.toString()
     });
 
-    const raw = await response.text();
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      data = { raw };
+    const text = await resp.text();
+    if (!resp.ok) {
+      console.error('oauth_exchange_failed', resp.status, text.substring(0, 200));
+      return { statusCode: 302, headers: { Location: '/pricing?provider=ebay&connected=0&reason=oauth_exchange_failed' }, body: '' };
     }
 
-    if (!response.ok) {
-      console.error("❌ eBay OAuth error:", data);
-      return { statusCode: 502, body: JSON.stringify({ ebay_error: data }) };
+    let token;
+    try { token = JSON.parse(text); } catch {
+      console.error('oauth_exchange_invalid_json', text.substring(0, 200));
+      return { statusCode: 302, headers: { Location: '/pricing?provider=ebay&connected=0&reason=invalid_json' }, body: '' };
     }
 
-    const { access_token, refresh_token, expires_in, scope, token_type } = data;
-
-    console.log("✅ Token response received");
+    const access_token = token?.access_token || null;
+    const refresh_token = token?.refresh_token || null;
+    const expires_in = token?.expires_in || null;
+    const scope = token?.scope || null;
 
     if (!access_token) {
-      console.error("❌ Missing access_token in eBay response");
-      return { statusCode: 502, body: JSON.stringify({ error: "missing_access_token" }) };
+      console.error('oauth_exchange_no_access_token');
+      return { statusCode: 302, headers: { Location: '/pricing?provider=ebay&connected=0&reason=no_access_token' }, body: '' };
     }
 
-    if (!refresh_token) {
-      console.error("❌ Missing refresh_token in eBay response");
-      return { statusCode: 502, body: JSON.stringify({ error: "missing_refresh_token" }) };
-    }
-
-    // --- Insertion Supabase ---
-    const supabase = createClient(supabaseUrl, supabaseKey);
-
-    // --- Upsert marketplace_accounts ---
-    console.log("🔄 Upserting marketplace_accounts...");
-    const { data: accountData, error: accountError } = await supabase
-      .from("marketplace_accounts")
-      .upsert(
-        {
-          user_id: null,
-          provider: "ebay",
-          provider_account_id: clientId,
-          display_name: "eBay Production",
-          environment: "production",
-          is_active: true,
-          client_id: clientId,
-          updated_at: new Date().toISOString(),
-        },
-        {
-          onConflict: "user_id,provider,environment,provider_account_id",
-        }
-      )
-      .select()
-      .single();
-
-    if (accountError) {
-      console.error("❌ marketplace_accounts upsert error:", accountError);
-      return { statusCode: 500, body: JSON.stringify({ account_error: accountError }) };
-    }
-
-    console.log("✅ marketplace_accounts upserted");
-
-    const scopesArray = scope ? scope.split(' ').filter(Boolean) : [];
-
-    const { error } = await supabase.from("oauth_tokens").insert({
-      marketplace_account_id: accountData.id,
-      provider: "ebay",
+    await supabaseService.from('oauth_tokens').insert({
+      marketplace_account_id: account.id,
+      provider: 'ebay',
+      environment: isSandbox ? 'sandbox' : 'production',
       access_token,
-      refresh_token,
-      expires_in: expires_in || null,
-      scopes: scopesArray.length > 0 ? scopesArray : null,
-      updated_at: new Date().toISOString(),
+      refresh_token: refresh_token || null,
+      expires_in,
+      scopes: scope || null
     });
 
-    if (error) {
-      console.error("❌ Supabase insert error:", error);
-      return { statusCode: 500, body: JSON.stringify({ insert_error: error }) };
-    }
-
-    console.log("✅ OAuth tokens stored successfully");
-
-    return {
-      statusCode: 302,
-      headers: {
-        Location: "/pricing?provider=ebay&connected=1",
-      },
-    };
+    const connectedFlag = refresh_token ? '1' : '0';
+    const reason = refresh_token ? '' : '&reason=token_missing_refresh';
+    return { statusCode: 302, headers: { Location: `/pricing?provider=ebay&connected=${connectedFlag}${reason}` }, body: '' };
   } catch (err) {
-    console.error("🔥 Callback fatal error:", err);
-    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
+    console.error('callback_fatal', err?.message || err);
+    return { statusCode: 500, body: JSON.stringify({ error: 'callback_server_error', detail: err?.message || 'unknown' }) };
   }
 };
