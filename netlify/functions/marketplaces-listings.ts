@@ -1,5 +1,45 @@
 process.env.NODE_NO_WARNINGS = process.env.NODE_NO_WARNINGS || '1';
-try { process.removeAllListeners && process.removeAllListeners('warning'); process.on && process.on('warning', () => {}); } catch {}
+
+const MAX_SKUS_PER_RUN = parseInt(process.env.EBAY_MAX_SKUS_PER_RUN || '300', 10);
+const CONCURRENCY = Math.min(parseInt(process.env.EBAY_CONCURRENCY || '3', 10), 10);
+const BATCH_DELAY_MS = parseInt(process.env.EBAY_BATCH_DELAY_MS || '250', 10);
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const fetchWithRetry = async (fetchFn, maxRetries = 3) => {
+  const delays = [500, 1000, 2000];
+  let lastError;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const result = await fetchFn();
+
+      if (result.ok) {
+        console.info(`✅ fetchWithRetry success on attempt ${attempt + 1}`);
+        return result;
+      }
+
+      if (result.status === 429 || result.status >= 500) {
+        console.warn(`⚠️ Retry attempt ${attempt + 1}/${maxRetries} on status ${result.status}`);
+        lastError = result;
+        if (attempt < maxRetries - 1) {
+          await sleep(delays[attempt]);
+          continue;
+        }
+      }
+
+      return result;
+    } catch (err) {
+      console.error(`❌ fetchWithRetry exception on attempt ${attempt + 1}:`, err);
+      lastError = err;
+      if (attempt < maxRetries - 1) {
+        await sleep(delays[attempt]);
+      }
+    }
+  }
+
+  throw lastError || new Error('fetchWithRetry_failed');
+};
 
 export const handler = async (event) => {
   const { createClient } = await import('@supabase/supabase-js');
@@ -9,7 +49,6 @@ export const handler = async (event) => {
   const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
   const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
   const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-  const RBAC_BYPASS = process.env.RBAC_DISABLED === 'true';
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
@@ -26,12 +65,12 @@ export const handler = async (event) => {
     const account_id = qs.account_id;
     const limit = Math.min(parseInt(qs.limit || '50', 10) || 50, 200);
     const offset = parseInt(qs.offset || '0', 10) || 0;
+    const maxOffersPerSku = parseInt(qs.max_offers_per_sku || '5', 10) || 5;
 
     if (!account_id) return badRequest('missing_account_id');
 
-    console.info('📋 Fetching account:', account_id, 'limit:', limit, 'offset:', offset);
+    console.info('📋 Fetching account:', account_id, 'limit:', limit, 'offset:', offset, 'maxOffersPerSku:', maxOffersPerSku);
 
-    // 1) Compte eBay actif (prod)
     const { data: account, error: accErr } = await supabaseService
       .from('marketplace_accounts')
       .select('*')
@@ -47,7 +86,6 @@ export const handler = async (event) => {
     }
     console.info('✅ Account found:', account.id);
 
-    // 2) Dernier token (access + refresh si dispo)
     const { data: tokenRow, error: tokErr } = await supabaseService
       .from('oauth_tokens')
       .select('*')
@@ -62,142 +100,155 @@ export const handler = async (event) => {
     }
     console.info('✅ Token found');
 
-    // 3) Prépare l'URL eBay
-    const baseHost = 'https://api.ebay.com';
-    const offersUrl = new URL('/sell/inventory/v1/offer', baseHost);
-    offersUrl.searchParams.set('limit', String(limit));
-    offersUrl.searchParams.set('offset', String(offset));
+    const host = 'https://api.ebay.com';
+    const authHeaders = (token) => ({
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json'
+    });
 
-    // 4) Locale eBay valide (BCP47) selon le compte, fallback fr-FR puis en-US
-    const pickLocale = (acc) => {
-      const norm = (s) => (typeof s === 'string' ? s.toLowerCase() : '');
-      const market = norm(acc.marketplace) || norm(acc.site) || norm(acc.region) || '';
-      const country = norm(acc.country) || norm(acc.country_code) || '';
-      // Si FR/CA-FR → fr-FR, sinon en-US par défaut
-      if (market.includes('fr') || country === 'fr') return 'fr-FR';
-      if (market.includes('gb') || country === 'gb' || market.includes('uk')) return 'en-GB';
-      if (market.includes('de') || country === 'de') return 'de-DE';
-      if (market.includes('it') || country === 'it') return 'it-IT';
-      if (market.includes('es') || country === 'es') return 'es-ES';
-      if (market.includes('au') || country === 'au') return 'en-AU';
-      if (market.includes('ca') && (norm(acc.language) === 'fr' || norm(acc.locale) === 'fr')) return 'fr-CA';
-      if (market.includes('ca') || country === 'ca') return 'en-CA';
-      return 'fr-FR'; // par défaut FR pour éviter 25709 observé
-    };
+    const readText = async (resp) => { try { return await resp.text(); } catch { return ''; } };
+    const parseJsonSafe = (txt) => { try { return JSON.parse(txt); } catch { return null; } };
 
-    const primaryLocale = pickLocale(account);
-    const fallbackLocale = primaryLocale === 'fr-FR' ? 'en-US' : 'fr-FR';
+    const fetchInventoryItems = async (token) => {
+      const url = new URL('/sell/inventory/v1/inventory_item', host);
+      url.searchParams.set('limit', String(limit));
+      url.searchParams.set('offset', String(offset));
+      console.info('🔄 Fetching inventory items:', url.toString());
 
-    const makeHeaders = (token, locale) => {
-      const h = {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/json',
-        'Accept-Language': locale // Forcé explicitement pour éviter l'injection d'une valeur invalide par la plateforme
-      };
-      return h;
-    };
+      return fetchWithRetry(async () => {
+        const resp = await fetch(url.toString(), { method: 'GET', headers: authHeaders(token) });
+        const raw = await readText(resp);
 
-    const fetchOffers = async (token, locale) => {
-      console.info('🔄 Fetching offers from eBay:', offersUrl.toString(), 'locale:', locale);
-      return fetch(offersUrl.toString(), {
-        method: 'GET',
-        headers: makeHeaders(token, locale)
+        if (resp.status === 401) return { ok: false, status: 401, raw };
+
+        if (!resp.ok) {
+          console.error('❌ inventory_items_error', raw);
+          return { ok: false, status: resp.status, raw };
+        }
+
+        const json = parseJsonSafe(raw);
+        if (!json) {
+          console.error('❌ invalid_json_inventory', raw.substring(0, 200));
+          return { ok: false, status: 502, raw };
+        }
+
+        const items = Array.isArray(json.inventoryItems) ? json.inventoryItems : [];
+        const skus = items.map(it => it && (it.sku || it.SKU || it.Sku)).filter(Boolean);
+        console.info('📦 Inventory SKUs found:', skus.length);
+
+        return { ok: true, skus, total: json.total || skus.length };
       });
     };
 
-    const readText = async (resp) => {
-      try { return await resp.text(); } catch { return ''; }
+    const fetchOffersBySku = async (token, sku) => {
+      const url = new URL('/sell/inventory/v1/offer', host);
+      url.searchParams.set('sku', sku);
+      url.searchParams.set('limit', String(maxOffersPerSku));
+      url.searchParams.set('offset', '0');
+
+      return fetchWithRetry(async () => {
+        const resp = await fetch(url.toString(), { method: 'GET', headers: authHeaders(token) });
+        const raw = await readText(resp);
+
+        if (resp.status === 400 && raw.includes('"errorId":25707')) {
+          console.warn('⚠️ invalid_sku_25707, skipping SKU:', sku);
+          return { ok: true, offers: [], skipped: true };
+        }
+
+        if (!resp.ok) {
+          console.error('❌ getOffers_error', sku, raw);
+          return { ok: false, status: resp.status, raw };
+        }
+
+        const json = parseJsonSafe(raw);
+        if (!json) {
+          console.error('❌ invalid_json_getOffers', raw.substring(0, 200));
+          return { ok: true, offers: [] };
+        }
+
+        const offers = Array.isArray(json.offers) ? json.offers : [];
+        return { ok: true, offers };
+      });
     };
 
-    const parseJsonSafe = (txt) => {
-      try { return JSON.parse(txt); } catch { return null; }
-    };
+    let accessToken = tokenRow.access_token;
+    let inv = await fetchInventoryItems(accessToken);
 
-    // 5) Premier appel avec locale primaire
-    let response = await fetchOffers(tokenRow.access_token, primaryLocale);
-    console.info('📡 eBay response status:', response.status);
-
-    // 5.a) Token expiré → refresh (si refresh_token dispo)
-    if (response.status === 401) {
-      console.warn('⚠️ eBay 401 on offers — token likely expired');
+    if (!inv.ok && inv.status === 401) {
+      console.warn('⚠️ Inventory 401 — attempting refresh');
       if (tokenRow.refresh_token && account.client_id && account.client_secret) {
-        console.info('🔄 Attempting token refresh...');
         const refreshed = await refreshAccessToken({
           client_id: account.client_id,
           client_secret: account.client_secret,
           refresh_token: tokenRow.refresh_token,
-          scopes: Array.isArray(tokenRow.scopes) && tokenRow.scopes.length > 0
+          scopes: (Array.isArray(tokenRow.scopes) && tokenRow.scopes.length > 0)
             ? tokenRow.scopes.join(' ')
-            : 'https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly'
+            : 'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly'
         });
 
         if (refreshed && refreshed.access_token) {
-          console.info('✅ Token refreshed successfully');
-          await supabaseService
-            .from('oauth_tokens')
-            .insert({
-              marketplace_account_id: account_id,
-              provider: 'ebay',
-              access_token: refreshed.access_token,
-              refresh_token: tokenRow.refresh_token,
-              expires_in: refreshed.expires_in || null,
-              scopes: tokenRow.scopes || null
-            });
-
-          response = await fetchOffers(refreshed.access_token, primaryLocale);
-          console.info('📡 Retry after refresh - status:', response.status);
+          await supabaseService.from('oauth_tokens').insert({
+            marketplace_account_id: account_id,
+            provider: 'ebay',
+            access_token: refreshed.access_token,
+            refresh_token: tokenRow.refresh_token,
+            expires_in: refreshed.expires_in || null,
+            scopes: tokenRow.scopes || null
+          });
+          accessToken = refreshed.access_token;
+          inv = await fetchInventoryItems(accessToken);
         } else {
-          console.error('❌ refresh_token failed');
           return { statusCode: 401, body: JSON.stringify({ error: 'token_expired' }) };
         }
       } else {
-        console.error('❌ No refresh_token available');
         return { statusCode: 401, body: JSON.stringify({ error: 'token_expired' }) };
       }
     }
 
-    // 5.b) Si 400 avec 25709 (ou 25707), réessayer avec l'autre locale autorisée
-    if (!response.ok && response.status === 400) {
-      const raw = await readText(response);
-      if (raw.includes('"errorId":25709') || raw.includes('"errorId":25707')) {
-        console.warn('🔁 Fallback retry for 25707/25709 with alternate locale:', fallbackLocale);
-        response = await fetch(offersUrl.toString(), {
-          method: 'GET',
-          headers: makeHeaders(tokenRow.access_token, fallbackLocale)
-        });
-        console.info('📡 Fallback retry - status:', response.status);
-        if (!response.ok) {
-          const raw2 = await readText(response);
-          console.error('❌ eBay API error after locale fallback:', raw2);
-          return { statusCode: 400, body: raw2 || JSON.stringify({ error: 'ebay_error_400' }) };
+    if (!inv.ok) {
+      return { statusCode: inv.status || 400, body: inv.raw || JSON.stringify({ error: 'inventory_fetch_failed' }) };
+    }
+
+    let skus = inv.skus || [];
+    if (!skus || skus.length === 0) {
+      console.info('ℹ️ No SKUs found in inventory');
+      return { statusCode: 200, body: JSON.stringify({ items: [], count: 0, limit, offset, processed_skus: 0, skipped_skus: 0, retries: 0 }) };
+    }
+
+    skus = skus.slice(0, MAX_SKUS_PER_RUN);
+    console.info('🔎 Processing', skus.length, 'SKUs (max', MAX_SKUS_PER_RUN, ')');
+
+    const allOffers = [];
+    let skippedCount = 0;
+    let totalRetries = 0;
+
+    for (let i = 0; i < skus.length; i += CONCURRENCY) {
+      const batch = skus.slice(i, i + CONCURRENCY);
+      console.info(`🔄 Processing batch ${Math.floor(i / CONCURRENCY) + 1}, SKUs ${i + 1}-${Math.min(i + CONCURRENCY, skus.length)}`);
+
+      const settled = await Promise.allSettled(batch.map((sku) => fetchOffersBySku(accessToken, sku)));
+
+      for (let k = 0; k < settled.length; k++) {
+        const r = settled[k];
+        if (r.status === 'fulfilled' && r.value && r.value.ok) {
+          if (r.value.skipped) {
+            skippedCount++;
+          } else if (Array.isArray(r.value.offers)) {
+            allOffers.push(...r.value.offers);
+          }
         }
-      } else {
-        console.error('❌ eBay API error (400)', raw);
-        return { statusCode: 400, body: raw || JSON.stringify({ error: 'ebay_error_400' }) };
+      }
+
+      if (i + CONCURRENCY < skus.length) {
+        console.info(`⏳ Waiting ${BATCH_DELAY_MS}ms before next batch`);
+        await sleep(BATCH_DELAY_MS);
       }
     }
 
-    // 6) Gestion erreurs HTTP restantes
-    if (!response.ok) {
-      const raw = await readText(response);
-      console.error('❌ eBay API error:', raw);
-      return { statusCode: response.status, body: raw || JSON.stringify({ error: 'ebay_error' }) };
-    }
+    console.info('🧾 Offers collected:', allOffers.length, 'Skipped SKUs:', skippedCount);
 
-    // 7) Parse payload
-    const text = await readText(response);
-    const json = parseJsonSafe(text);
-    if (!json) {
-      console.error('❌ invalid JSON', text.substring(0, 200));
-      return { statusCode: 502, body: JSON.stringify({ error: 'invalid_json', raw: text.substring(0, 200) }) };
-    }
-
-    const offers = Array.isArray(json.offers) ? json.offers : [];
     const defaultCurrency = account.currency || 'EUR';
-
-    console.info('📦 Processing', offers.length, 'offers');
-
-    const items = offers.map((offer) => ({
+    const items = allOffers.map((offer) => ({
       provider: 'ebay',
       marketplace_account_id: account_id,
       remote_id: offer && offer.offerId ? offer.offerId : null,
@@ -219,7 +270,6 @@ export const handler = async (event) => {
       const { error: upsertError } = await supabaseService
         .from('marketplace_listings')
         .upsert(items, { onConflict: 'provider,marketplace_account_id,remote_id' });
-
       if (upsertError) {
         console.error('❌ upsert_failed', upsertError);
         return srvError('upsert_failed', upsertError.message || 'unknown');
@@ -233,9 +283,11 @@ export const handler = async (event) => {
       body: JSON.stringify({
         items,
         count: items.length,
-        total: json.total || items.length,
         limit,
-        offset
+        offset,
+        processed_skus: skus.length,
+        skipped_skus: skippedCount,
+        retries: totalRetries
       })
     };
   } catch (err) {
@@ -247,27 +299,23 @@ export const handler = async (event) => {
 async function refreshAccessToken({ client_id, client_secret, refresh_token, scopes }) {
   const endpoint = 'https://api.ebay.com/identity/v1/oauth2/token';
 
-  console.info('🔐 Refreshing access token...');
-
   try {
-    const credentials = Buffer.from(`${client_id}:${client_secret}`).toString('base64');
-    const body = new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: refresh_token,
-      scope: scopes
-    });
+    const basic = Buffer.from(`${client_id}:${client_secret}`).toString('base64');
+    const body = new URLSearchParams();
+    body.set('grant_type', 'refresh_token');
+    body.set('refresh_token', refresh_token);
+    if (scopes) body.set('scope', scopes);
 
     const resp = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        Authorization: `Basic ${credentials}`,
+        Authorization: `Basic ${basic}`,
         'Content-Type': 'application/x-www-form-urlencoded'
       },
       body: body.toString()
     });
 
     const text = await resp.text();
-
     if (!resp.ok) {
       console.error('❌ refresh_access_token_failed', text);
       return null;
