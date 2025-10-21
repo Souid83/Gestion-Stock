@@ -66,23 +66,17 @@ export const handler = async (event) => {
 
     const { access_token, refresh_token, expires_in, scope, token_type } = data;
 
-    // --- Chiffrement AES-GCM du refresh token ---
-    const encryptToken = (token, secret) => {
-      const iv = crypto.randomBytes(16);
-      const key = crypto.scryptSync(secret, "salt", 32);
-      const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-      const enc = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
-      const tag = cipher.getAuthTag();
-      return JSON.stringify({
-        iv: iv.toString("hex"),
-        tag: tag.toString("hex"),
-        data: enc.toString("hex"),
-      });
-    };
+    console.log("✅ Token response received");
 
-    const encryptedRefresh = refresh_token
-      ? encryptToken(refresh_token, secretKey)
-      : null;
+    if (!access_token) {
+      console.error("❌ Missing access_token in eBay response");
+      return { statusCode: 502, body: JSON.stringify({ error: "missing_access_token" }) };
+    }
+
+    if (!refresh_token) {
+      console.error("❌ Missing refresh_token in eBay response");
+      return { statusCode: 502, body: JSON.stringify({ error: "missing_refresh_token" }) };
+    }
 
     // --- Insertion Supabase ---
     const supabase = createClient(supabaseUrl, supabaseKey);
@@ -99,6 +93,7 @@ export const handler = async (event) => {
           display_name: "eBay Production",
           environment: "production",
           is_active: true,
+          client_id: clientId,
           updated_at: new Date().toISOString(),
         },
         {
@@ -113,18 +108,18 @@ export const handler = async (event) => {
       return { statusCode: 500, body: JSON.stringify({ account_error: accountError }) };
     }
 
-    console.log("✅ marketplace_accounts upserted:", accountData);
+    console.log("✅ marketplace_accounts upserted");
+
+    const scopesArray = scope ? scope.split(' ').filter(Boolean) : [];
 
     const { error } = await supabase.from("oauth_tokens").insert({
       marketplace_account_id: accountData.id,
+      provider: "ebay",
       access_token,
-      refresh_token_encrypted: encryptedRefresh,
-      scope,
-      token_type,
-      expires_at: new Date(Date.now() + (expires_in || 7200) * 1000).toISOString(),
-      created_at: new Date().toISOString(),
+      refresh_token,
+      expires_in: expires_in || null,
+      scopes: scopesArray.length > 0 ? scopesArray : null,
       updated_at: new Date().toISOString(),
-      state_nonce: state || "none",
     });
 
     if (error) {
@@ -137,7 +132,7 @@ export const handler = async (event) => {
     return {
       statusCode: 302,
       headers: {
-        Location: "https://dev-gestockflow.netlify.app/pricing?provider=ebay&connected=1",
+        Location: "/pricing?provider=ebay&connected=1",
       },
     };
   } catch (err) {
