@@ -156,12 +156,11 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
     const { data: tokenRows, error: tokErr } = await supabaseService
       .from('oauth_tokens')
       .select('*')
-      .eq('provider', 'ebay')
       .eq('marketplace_account_id', account_id)
       .neq('access_token', 'pending')
       .order('updated_at', { ascending: false })
       .order('created_at', { ascending: false })
-      .range(0, 0); // prend uniquement la première ligne
+      .range(0, 0);
 
     const tokenRow = Array.isArray(tokenRows) ? tokenRows[0] : null;
 
