@@ -213,6 +213,11 @@ async function refreshAccessToken(
 export const handler = async (event: NetlifyEvent, context: NetlifyContext): Promise<NetlifyResponse> => {
   console.log('🚀 marketplaces-listings function triggered');
 
+  const RBAC_BYPASS = process.env.RBAC_DISABLED === "true";
+  if (RBAC_BYPASS) {
+    console.log("⚙️ RBAC bypass activé pour marketplaces-listings");
+  }
+
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
@@ -225,7 +230,11 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       };
     }
 
-    const hasAccess = await checkRBAC(supabase);
+    if (RBAC_BYPASS) {
+      console.log("🟢 RBAC bypass actif, accès autorisé pour eBay system sync");
+    }
+
+    const hasAccess = RBAC_BYPASS || await checkRBAC(supabase);
     if (!hasAccess) {
       console.log('❌ Access denied: user is not admin');
       return {
