@@ -15,61 +15,45 @@ export const handler = async (event) => {
   const srvError = (code, detail) => ({ statusCode: 500, body: JSON.stringify({ error: code, detail }) });
 
   try {
-    if (event.httpMethod !== 'GET') {
-      return { statusCode: 405, body: JSON.stringify({ error: 'method_not_allowed' }) };
-    }
+    if (event.httpMethod !== 'GET') return { statusCode: 405, body: JSON.stringify({ error: 'method_not_allowed' }) };
 
     const qs = event.queryStringParameters || {};
     const account_id = qs.account_id;
-    const limit = Math.min(parseInt(qs.limit || '50', 10) || 50, 200);        // page size pour inventory items
-    const offset = parseInt(qs.offset || '0', 10) || 0;                       // pagination inventory
-    const maxOffersPerSku = parseInt(qs.max_offers_per_sku || '5', 10) || 5;  // sécurité
+    const limit = Math.min(parseInt(qs.limit || '50', 10) || 50, 200);
+    const offset = parseInt(qs.offset || '0', 10) || 0;
+    const maxOffersPerSku = parseInt(qs.max_offers_per_sku || '5', 10) || 5;
     const CONCURRENCY = Math.min(parseInt(qs.concurrency || '3', 10) || 3, 10);
 
     if (!account_id) return badRequest('missing_account_id');
     console.info('📋 Fetching account:', account_id, 'limit:', limit, 'offset:', offset, 'maxOffersPerSku:', maxOffersPerSku);
 
-    // Account
-    const { data: account, error: accErr } = await supabaseService
+    const { data: account } = await supabaseService
       .from('marketplace_accounts')
       .select('*')
       .eq('id', account_id)
       .eq('provider', 'ebay')
       .eq('is_active', true)
       .maybeSingle();
-    if (accErr || !account) {
-      console.error('❌ account_not_found', accErr);
-      return { statusCode: 404, body: JSON.stringify({ error: 'account_not_found' }) };
-    }
+    if (!account) return { statusCode: 404, body: JSON.stringify({ error: 'account_not_found' }) };
     console.info('✅ Account found:', account.id);
 
-    // Tokens
-    const { data: tokenRow, error: tokErr } = await supabaseService
+    const { data: tokenRow } = await supabaseService
       .from('oauth_tokens')
       .select('*')
       .eq('marketplace_account_id', account_id)
       .order('updated_at', { ascending: false })
       .limit(1)
       .maybeSingle();
-    if (tokErr || !tokenRow) {
-      console.error('❌ token_missing', tokErr);
-      return { statusCode: 424, body: JSON.stringify({ error: 'token_missing' }) };
-    }
+    if (!tokenRow) return { statusCode: 424, body: JSON.stringify({ error: 'token_missing' }) };
     console.info('✅ Token found');
 
-    // Host selon env du compte
     const baseHost = account.environment === 'sandbox' ? 'https://api.sandbox.ebay.com' : 'https://api.ebay.com';
-
-    // Headers minimaux (jamais Accept-Language)
-    const authHeaders = (token) => ({
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json'
-    });
+    const authHeaders = (token) => ({ Authorization: `Bearer ${token}`, Accept: 'application/json' });
 
     const readText = async (resp) => { try { return await resp.text(); } catch { return ''; } };
-    const parseJsonSafe = (txt) => { try { return JSON.parse(txt); } catch { return null; } };
+    const parseJson = (txt) => { try { return JSON.parse(txt); } catch { return null; } };
 
-    // ---------- 1) Inventory items → SKUs ----------
+    // 1) Inventory → SKUs
     const inventoryUrl = new URL('/sell/inventory/v1/inventory_item', baseHost);
     inventoryUrl.searchParams.set('limit', String(limit));
     inventoryUrl.searchParams.set('offset', String(offset));
@@ -78,7 +62,6 @@ export const handler = async (event) => {
     let accessToken = tokenRow.access_token;
 
     let invResp = await fetch(inventoryUrl.toString(), { method: 'GET', headers: authHeaders(accessToken) });
-
     if (invResp.status === 401) {
       console.warn('⚠️ Inventory 401 — attempting refresh');
       if (!tokenRow.refresh_token) {
@@ -105,8 +88,9 @@ export const handler = async (event) => {
       }
 
       await supabaseService.from('oauth_tokens').insert({
-        marketplace_account_id: account_id,
+        marketplace_account_id: account.id,
         provider: 'ebay',
+        environment: account.environment === 'sandbox' ? 'sandbox' : 'production',
         access_token: refreshed.access_token,
         refresh_token: tokenRow.refresh_token,
         expires_in: refreshed.expires_in || null,
@@ -123,7 +107,7 @@ export const handler = async (event) => {
       return { statusCode: invResp.status, body: invText || JSON.stringify({ error: 'inventory_error' }) };
     }
 
-    const invJson = parseJsonSafe(invText);
+    const invJson = parseJson(invText);
     if (!invJson) {
       console.error('❌ invalid_json_inventory', invText.substring(0, 200));
       return { statusCode: 502, body: JSON.stringify({ error: 'invalid_json_inventory', raw: invText.substring(0, 200) }) };
@@ -132,12 +116,11 @@ export const handler = async (event) => {
     const inventoryItems = Array.isArray(invJson.inventoryItems) ? invJson.inventoryItems : [];
     const skus = inventoryItems.map((it) => it && (it.sku || it.SKU || it.Sku)).filter(Boolean);
     console.info('📦 Inventory SKUs found:', skus.length);
-
     if (skus.length === 0) {
       return { statusCode: 200, body: JSON.stringify({ items: [], count: 0, limit, offset, processed_skus: 0, skipped_skus: 0 }) };
     }
 
-    // ---------- 2) Offers par SKU (pas d'Accept-Language) ----------
+    // 2) Offers by SKU (no Accept-Language)
     const fetchOffersBySku = async (token, sku) => {
       const url = new URL('/sell/inventory/v1/offer', baseHost);
       url.searchParams.set('sku', sku);
@@ -156,7 +139,7 @@ export const handler = async (event) => {
         return [];
       }
 
-      const js = parseJsonSafe(raw);
+      const js = parseJson(raw);
       return Array.isArray(js?.offers) ? js.offers : [];
     };
 
@@ -175,7 +158,7 @@ export const handler = async (event) => {
     }
     console.info('🧾 Offers collected:', allOffers.length);
 
-    // ---------- 3) Mapping + upsert ----------
+    // 3) Mapping + upsert
     const defaultCurrency = account.currency || 'EUR';
     const items = allOffers.map((offer) => ({
       provider: 'ebay',
@@ -200,20 +183,9 @@ export const handler = async (event) => {
     }
 
     console.info('✅ Successfully synced', items.length, 'offers');
-
-    return {
-      statusCode: 200,
-      body: JSON.stringify({
-        items,
-        count: items.length,
-        limit,
-        offset,
-        processed_skus: skus.length,
-        skipped_skus: skipped
-      })
-    };
+    return { statusCode: 200, body: JSON.stringify({ items, count: items.length, limit, offset, processed_skus: skus.length, skipped_skus: skipped }) };
   } catch (err) {
-    console.error('🔥 fatal', err);
+    console.error('🔥 fatal', err?.message || err);
     return srvError('server_error', err?.message || 'unknown');
   }
 };
@@ -236,7 +208,6 @@ async function refreshAccessToken({ client_id, client_secret, refresh_token, sco
       body: body.toString()
     });
     const text = await resp.text();
-
     if (!resp.ok) {
       console.error('❌ refresh_access_token_failed status=', resp.status, ' endpoint=', endpoint, ' body=', text.substring(0, 120));
       return null;

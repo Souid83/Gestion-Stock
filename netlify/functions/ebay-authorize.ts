@@ -1,199 +1,54 @@
-import { createClient } from '@supabase/supabase-js';
-
-interface NetlifyEvent {
-  httpMethod: string;
-  headers: Record<string, string>;
-  body: string | null;
-}
-
-interface NetlifyContext {
-  clientContext?: {
-    user?: {
-      sub: string;
-    };
-  };
-}
-
-interface NetlifyResponse {
-  statusCode: number;
-  body: string;
-  headers?: Record<string, string>;
-}
-
-const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
-const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
-const SECRET_KEY = process.env.SECRET_KEY || '';
-
-const EBAY_SANDBOX_AUTH_URL = 'https://auth.sandbox.ebay.com/oauth2/authorize';
-const EBAY_PRODUCTION_AUTH_URL = 'https://auth.ebay.com/oauth2/authorize';
-
-interface RequestBody {
-  environment: 'sandbox' | 'production';
-  client_id: string;
-  client_secret: string;
-  runame: string;
-}
-
-async function encryptData(data: string): Promise<{ encrypted: string; iv: string }> {
-  if (!SECRET_KEY) {
-    throw new Error('SECRET_KEY not configured');
-  }
-
-  const encoder = new TextEncoder();
-  const dataBuffer = encoder.encode(data);
-
-  const keyBuffer = Buffer.from(SECRET_KEY, 'base64');
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw',
-    keyBuffer,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt']
-  );
-
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-
-  const encryptedBuffer = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    cryptoKey,
-    dataBuffer
-  );
-
-  return {
-    encrypted: Buffer.from(encryptedBuffer).toString('base64'),
-    iv: Buffer.from(iv).toString('base64')
-  };
-}
-
-function generateStateNonce(): string {
-  const array = new Uint8Array(32);
-  crypto.getRandomValues(array);
-  return Buffer.from(array).toString('base64url');
-}
-
-async function checkAdminAccess(supabase: any): Promise<boolean> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return false;
-
-  const { data, error } = await supabase
-    .from('admin_users')
-    .select('is_admin')
-    .eq('id', user.id)
-    .maybeSingle();
-
-  if (error || !data) return false;
-  return data.is_admin === true;
-}
-
-export const handler = async (event: NetlifyEvent, context: NetlifyContext): Promise<NetlifyResponse> => {
-  // RBAC bypass pour développement / sandbox
-  const RBAC_BYPASS = process.env.RBAC_DISABLED === 'true';
-  if (RBAC_BYPASS) {
-    console.log('⚙️ RBAC bypass activé pour eBay authorize');
-  }
-
-  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    global: {
-      headers: {
-        Authorization: event.headers.authorization || ''
-      }
-    }
-  });
+export const handler = async (event) => {
+  const { createClient } = await import('@supabase/supabase-js');
 
   try {
-    if (event.httpMethod !== 'POST') {
-      return {
-        statusCode: 405,
-        body: JSON.stringify({ error: 'method_not_allowed' })
-      };
+    if (event.httpMethod !== 'GET') {
+      return { statusCode: 405, body: JSON.stringify({ error: 'method_not_allowed' }) };
     }
 
-    const isAdmin = await checkAdminAccess(supabase);
-    if (!isAdmin && !RBAC_BYPASS) {
-      return {
-        statusCode: 403,
-        body: JSON.stringify({ error: 'forbidden' })
-      };
+    const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
+    const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+
+    const qs = event.queryStringParameters || {};
+    const account_id = qs.account_id || qs.state;
+    if (!account_id) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'missing_account_id' }) };
     }
 
-    if (!event.body) {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ error: 'bad_request', hint: 'Missing request body' })
-      };
+    const { data: account, error: accErr } = await supabaseService
+      .from('marketplace_accounts')
+      .select('id, client_id, runame, environment, provider, is_active')
+      .eq('id', account_id)
+      .eq('provider', 'ebay')
+      .eq('is_active', true)
+      .maybeSingle();
+
+    if (accErr || !account || !account.client_id || !account.runame) {
+      return { statusCode: 404, body: JSON.stringify({ error: 'account_or_settings_not_found' }) };
     }
 
-    const body: RequestBody = JSON.parse(event.body);
-    const { environment, client_id, client_secret, runame } = body;
+    const isSandbox = account.environment === 'sandbox';
+    const authHost = isSandbox ? 'https://auth.sandbox.ebay.com' : 'https://auth.ebay.com';
 
-    if (!environment || !client_id || !client_secret || !runame) {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ error: 'bad_request', hint: 'All fields are required' })
-      };
-    }
-
-    if (environment !== 'sandbox' && environment !== 'production') {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ error: 'bad_request', hint: 'Invalid environment' })
-      };
-    }
-
-    const { encrypted: encryptedClientId, iv } = await encryptData(client_id);
-    const { encrypted: encryptedClientSecret } = await encryptData(client_secret);
-
-    await supabase
-      .from('provider_app_credentials')
-      .upsert({
-        provider: 'ebay',
-        environment,
-        client_id_encrypted: encryptedClientId,
-        client_secret_encrypted: encryptedClientSecret,
-        runame,
-        encryption_iv: iv,
-        updated_at: new Date().toISOString()
-      }, {
-        onConflict: 'provider,environment'
-      });
-
-    const stateNonce = generateStateNonce();
-
-    await supabase
-      .from('oauth_tokens')
-      .insert({
-        marketplace_account_id: null,
-        access_token: 'pending',
-        state_nonce: stateNonce,
-        expires_at: new Date(Date.now() + 600000).toISOString(),
-        updated_at: new Date().toISOString()
-      });
-
-    const authBaseUrl = environment === 'sandbox'
-  ? EBAY_SANDBOX_AUTH_URL
-  : EBAY_PRODUCTION_AUTH_URL;
-
-
+    // Scopes lecture minimum (Vague A)
     const scopes = [
       'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.inventory',
-      'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly'
-    ];
+      'https://api.ebay.com/oauth/api_scope/sell.account.readonly'
+    ].join(' ');
 
-    const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(runame)}&scope=${encodeURIComponent(scopes.join(' '))}&prompt=login&state=${encodeURIComponent(stateNonce)}`;
+    const authUrl =
+      `${authHost}/oauth2/authorize?` +
+      `client_id=${encodeURIComponent(account.client_id)}` +
+      `&response_type=code` +
+      `&redirect_uri=${encodeURIComponent(account.runame)}` + // RUName EXACT
+      `&scope=${encodeURIComponent(scopes)}` +
+      `&prompt=login` +
+      `&state=${encodeURIComponent(account.id)}`;
 
-    return {
-      statusCode: 200,
-      body: JSON.stringify({
-        authorizeUrl
-      })
-    };
-
-  } catch (error: any) {
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: 'server_error' })
-    };
+    return { statusCode: 302, headers: { Location: authUrl } };
+  } catch (err) {
+    console.error('authorize_fatal', err?.message || err);
+    return { statusCode: 500, body: JSON.stringify({ error: 'authorize_server_error', detail: err?.message || 'unknown' }) };
   }
 };
