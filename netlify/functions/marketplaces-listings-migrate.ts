@@ -51,10 +51,11 @@ const readText = async (resp: Response): Promise<string> => {
 };
 const parseJson = (txt: string): any => { try { return JSON.parse(txt); } catch { return null; } };
 
-const authHeaders = (token: string, acceptLang?: string): Record<string, string> => {
-  const h: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
-  if (acceptLang) h['Accept-Language'] = acceptLang;
-  return h;
+const authHeaders = (token: string): Record<string, string> => {
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/json'
+  };
 };
 
 async function refreshAccessToken({
@@ -253,16 +254,17 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
       if (max_batches !== null && batchesProcessed >= max_batches) break;
       const batch = listingIds.slice(i, i + batch_size);
 
-      const doCall = async (acceptLang?: string) => fetchWithRetry(async () => {
-        return fetch(migrateUrl, {
-          method: 'POST',
-          headers: {
-            ...authHeaders(accessToken, acceptLang),
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ listingIds: batch })
+      const doCall = async () =>
+        fetchWithRetry(async () => {
+          return fetch(migrateUrl, {
+            method: 'POST',
+            headers: {
+              ...authHeaders(accessToken),
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ listingIds: batch })
+          });
         });
-      });
 
       let resp = await doCall();
       let raw = await readText(resp);
@@ -284,10 +286,10 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
 
       // 25709 fallback Accept-Language (none -> en-US -> fr-FR)
       if (!resp.ok && resp.status === 400 && raw.includes('"errorId":25709')) {
-        resp = await doCall('en-US');
+        resp = await doCall();
         raw = await readText(resp);
         if (!resp.ok && resp.status === 400 && raw.includes('"errorId":25709')) {
-          resp = await doCall('fr-FR');
+          resp = await doCall();
           raw = await readText(resp);
         }
       }
