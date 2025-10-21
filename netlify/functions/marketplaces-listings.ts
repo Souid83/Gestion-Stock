@@ -44,34 +44,51 @@ export const handler = async (event) => {
     }
 
     const accessToken = tokenRow.access_token
-    const ebayApiUrl = 'https://api.ebay.com/sell/inventory/v1/offer?limit=50'
+    const baseUrl = 'https://api.ebay.com/sell/inventory/v1/offer';
+    const ebayApiUrl = `${baseUrl}?limit=50&offset=0`;
+
     let response = await fetch(ebayApiUrl, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Accept: 'application/json',
-        'Content-Type': 'application/json',
         'Accept-Language': 'en-US'
       }
-    })
+    });
 
     if (response.status === 401) {
-      console.warn('⚠️ eBay 401 on offers — token likely expired')
-      return { statusCode: 401, body: JSON.stringify({ error: 'token_expired' }) }
+  console.warn('⚠️ eBay 401 on offers — token likely expired');
+  return { statusCode: 401, body: JSON.stringify({ error: 'token_expired' }) };
+}
+
+
+    let text = await response.text();
+
+    // Fallback si 25707 (SKU invalide) possiblement causé par certains headers ou gateways eBay
+    if (!response.ok && response.status === 400 && text.includes('"errorId":25707')) {
+      console.warn('🔁 Fallback retry for 25707: removing optional headers…');
+      response = await fetch(ebayApiUrl, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json'
+          // pas de Content-Type, pas d'Accept-Language
+        }
+      });
+      text = await response.text();
     }
 
-    const text = await response.text()
     if (!response.ok) {
-      console.error('❌ eBay API error:', text)
-      return { statusCode: response.status, body: text }
+      console.error('❌ eBay API error:', text);
+      return { statusCode: response.status, body: text };
     }
 
-    let data
+    let data;
     try {
-      data = JSON.parse(text)
+      data = JSON.parse(text);
     } catch {
-      console.error('❌ invalid JSON', text.substring(0, 200))
-      return { statusCode: 502, body: JSON.stringify({ error: 'invalid_json', raw: text }) }
+      console.error('❌ invalid JSON', text.substring(0, 200));
+      return { statusCode: 502, body: JSON.stringify({ error: 'invalid_json', raw: text }) };
     }
 
     const items = (data.offers || []).map((offer) => ({
