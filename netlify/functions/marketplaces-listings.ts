@@ -89,6 +89,9 @@ export const handler = async (event: any) => {
       .from('oauth_tokens')
       .select('*')
       .eq('marketplace_account_id', account_id)
+      .eq('provider', 'ebay')
+      .neq('access_token', 'pending')
+      .not('refresh_token', 'is', null)
       .order('updated_at', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -249,7 +252,7 @@ export const handler = async (event: any) => {
       const batch = skus.slice(i, i + CONCURRENCY);
       console.info(`🔄 Processing batch ${Math.floor(i / CONCURRENCY) + 1}, SKUs ${i + 1}-${Math.min(i + CONCURRENCY, skus.length)}`);
 
-      const settled = await Promise.allSettled(batch.map((sku) => fetchOffersBySku(accessToken, sku)));
+      const settled = await Promise.allSettled(batch.map((sku: string) => fetchOffersBySku(accessToken, sku)));
 
       for (let k = 0; k < settled.length; k++) {
         const r = settled[k];

@@ -98,7 +98,8 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         .from("marketplace_accounts")
         .select("*")
         .eq("provider", providerRBAC)
-        .eq("is_active", true);
+        .eq("is_active", true)
+        .order('created_at', { ascending: false });
       if (error) {
         console.error("❌ Supabase error:", error);
         return { statusCode: 500, body: JSON.stringify({ error }) };
@@ -107,8 +108,9 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       // Tokens: get latest per account_id (order desc, take first seen)
       const { data: tokens } = await supabaseService
         .from('oauth_tokens')
-        .select('marketplace_account_id, created_at, provider')
+        .select('marketplace_account_id, created_at, provider, access_token')
         .eq('provider', providerRBAC)
+        .neq('access_token', 'pending')
         .order('created_at', { ascending: false });
 
       const hasToken = new Set<string>();
@@ -118,21 +120,30 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         }
       });
 
-      // Deduplicate by account id and add connected flag
-      const map = new Map<string, any>();
+      // Group by provider_account_id and pick canonical id (prefer one with token)
+      const groups = new Map<string, any[]>();
       for (const a of (data || [])) {
-        if (!a || !a.id) continue;
-        if (!map.has(a.id)) {
-          map.set(a.id, {
-            id: a.id,
-            display_name: a.display_name,
-            environment: a.environment,
-            provider_account_id: a.provider_account_id,
-            connected: hasToken.has(a.id)
-          });
-        }
+        if (!a || !a.provider_account_id) continue;
+        const key = a.provider_account_id;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(a);
       }
-      const accounts = Array.from(map.values());
+
+      const accounts = [];
+      for (const [key, accs] of groups.entries()) {
+        // accs are already ordered by created_at desc
+        const withToken = accs.find(x => x && x.id && hasToken.has(x.id));
+        const canonical = withToken || accs[0];
+        if (!canonical) continue;
+        accounts.push({
+          id: canonical.id,
+          display_name: canonical.display_name,
+          environment: canonical.environment,
+          provider_account_id: canonical.provider_account_id,
+          connected: Boolean(withToken)
+        });
+      }
+
       return { statusCode: 200, body: JSON.stringify({ accounts }) };
     }
 
@@ -180,8 +191,9 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     // Fetch latest tokens per account_id and build hasToken set
     const { data: tokens } = await supabaseService
       .from('oauth_tokens')
-      .select('marketplace_account_id, created_at, provider')
+      .select('marketplace_account_id, created_at, provider, access_token')
       .eq('provider', provider)
+      .neq('access_token', 'pending')
       .order('created_at', { ascending: false });
 
     const hasToken = new Set<string>();
@@ -191,21 +203,29 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       }
     });
 
-    // Deduplicate by id and add connected flag
-    const map = new Map<string, any>();
+    // Group by provider_account_id and pick canonical id (prefer one with token)
+    const groups = new Map<string, any[]>();
     for (const a of (accounts || [])) {
-      if (!a || !a.id) continue;
-      if (!map.has(a.id)) {
-        map.set(a.id, {
-          id: a.id,
-          display_name: a.display_name,
-          environment: a.environment,
-          provider_account_id: a.provider_account_id,
-          connected: hasToken.has(a.id)
-        });
-      }
+      if (!a || !a.provider_account_id) continue;
+      const key = a.provider_account_id;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(a);
     }
-    const resultAccounts = Array.from(map.values());
+
+    const resultAccounts: any[] = [];
+    for (const [key, accs] of groups.entries()) {
+      // accounts already ordered by created_at desc in the query
+      const withToken = accs.find(x => x && x.id && hasToken.has(x.id));
+      const canonical = withToken || accs[0];
+      if (!canonical) continue;
+      resultAccounts.push({
+        id: canonical.id,
+        display_name: canonical.display_name,
+        environment: canonical.environment,
+        provider_account_id: canonical.provider_account_id,
+        connected: Boolean(withToken)
+      });
+    }
 
     await logToSyncLogs(supabase, provider, 'accounts_list', 'ok', {
       http_status: 200,
