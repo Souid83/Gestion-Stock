@@ -1,4 +1,5 @@
 process.env.NODE_NO_WARNINGS = process.env.NODE_NO_WARNINGS || '1';
+try { process.removeAllListeners && process.removeAllListeners('warning'); process.on && process.on('warning', () => {}); } catch {}
 
 export const handler = async (event) => {
   const { createClient } = await import('@supabase/supabase-js');
@@ -28,8 +29,9 @@ export const handler = async (event) => {
 
     if (!account_id) return badRequest('missing_account_id');
 
-    console.log('📋 Fetching account:', account_id, 'limit:', limit, 'offset:', offset);
+    console.info('📋 Fetching account:', account_id, 'limit:', limit, 'offset:', offset);
 
+    // 1) Compte eBay actif (prod)
     const { data: account, error: accErr } = await supabaseService
       .from('marketplace_accounts')
       .select('*')
@@ -43,9 +45,9 @@ export const handler = async (event) => {
       console.error('❌ account_not_found', accErr);
       return { statusCode: 404, body: JSON.stringify({ error: 'account_not_found' }) };
     }
+    console.info('✅ Account found:', account.id);
 
-    console.log('✅ Account found:', account.id);
-
+    // 2) Dernier token (access + refresh si dispo)
     const { data: tokenRow, error: tokErr } = await supabaseService
       .from('oauth_tokens')
       .select('*')
@@ -58,50 +60,68 @@ export const handler = async (event) => {
       console.error('❌ token_missing', tokErr);
       return { statusCode: 424, body: JSON.stringify({ error: 'token_missing' }) };
     }
+    console.info('✅ Token found');
 
-    console.log('✅ Token found');
-
+    // 3) Prépare l'URL eBay
     const baseHost = 'https://api.ebay.com';
     const offersUrl = new URL('/sell/inventory/v1/offer', baseHost);
     offersUrl.searchParams.set('limit', String(limit));
     offersUrl.searchParams.set('offset', String(offset));
 
-    const defaultHeaders = (token) => ({
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json'
-    });
+    // 4) Locale eBay valide (BCP47) selon le compte, fallback fr-FR puis en-US
+    const pickLocale = (acc) => {
+      const norm = (s) => (typeof s === 'string' ? s.toLowerCase() : '');
+      const market = norm(acc.marketplace) || norm(acc.site) || norm(acc.region) || '';
+      const country = norm(acc.country) || norm(acc.country_code) || '';
+      // Si FR/CA-FR → fr-FR, sinon en-US par défaut
+      if (market.includes('fr') || country === 'fr') return 'fr-FR';
+      if (market.includes('gb') || country === 'gb' || market.includes('uk')) return 'en-GB';
+      if (market.includes('de') || country === 'de') return 'de-DE';
+      if (market.includes('it') || country === 'it') return 'it-IT';
+      if (market.includes('es') || country === 'es') return 'es-ES';
+      if (market.includes('au') || country === 'au') return 'en-AU';
+      if (market.includes('ca') && (norm(acc.language) === 'fr' || norm(acc.locale) === 'fr')) return 'fr-CA';
+      if (market.includes('ca') || country === 'ca') return 'en-CA';
+      return 'fr-FR'; // par défaut FR pour éviter 25709 observé
+    };
 
-    const fetchOffers = async (token) => {
-      console.log('🔄 Fetching offers from eBay:', offersUrl.toString());
+    const primaryLocale = pickLocale(account);
+    const fallbackLocale = primaryLocale === 'fr-FR' ? 'en-US' : 'fr-FR';
+
+    const makeHeaders = (token, locale) => {
+      const h = {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+        'Accept-Language': locale // Forcé explicitement pour éviter l'injection d'une valeur invalide par la plateforme
+      };
+      return h;
+    };
+
+    const fetchOffers = async (token, locale) => {
+      console.info('🔄 Fetching offers from eBay:', offersUrl.toString(), 'locale:', locale);
       return fetch(offersUrl.toString(), {
         method: 'GET',
-        headers: defaultHeaders(token)
+        headers: makeHeaders(token, locale)
       });
     };
 
     const readText = async (resp) => {
-      try {
-        return await resp.text();
-      } catch {
-        return '';
-      }
+      try { return await resp.text(); } catch { return ''; }
     };
 
     const parseJsonSafe = (txt) => {
-      try {
-        return JSON.parse(txt);
-      } catch {
-        return null;
-      }
+      try { return JSON.parse(txt); } catch { return null; }
     };
 
-    let response = await fetchOffers(tokenRow.access_token);
-    console.log('📡 eBay response status:', response.status);
+    // 5) Premier appel avec locale primaire
+    let response = await fetchOffers(tokenRow.access_token, primaryLocale);
+    console.info('📡 eBay response status:', response.status);
 
+    // 5.a) Token expiré → refresh (si refresh_token dispo)
     if (response.status === 401) {
       console.warn('⚠️ eBay 401 on offers — token likely expired');
       if (tokenRow.refresh_token && account.client_id && account.client_secret) {
-        console.log('🔄 Attempting token refresh...');
+        console.info('🔄 Attempting token refresh...');
         const refreshed = await refreshAccessToken({
           client_id: account.client_id,
           client_secret: account.client_secret,
@@ -112,7 +132,7 @@ export const handler = async (event) => {
         });
 
         if (refreshed && refreshed.access_token) {
-          console.log('✅ Token refreshed successfully');
+          console.info('✅ Token refreshed successfully');
           await supabaseService
             .from('oauth_tokens')
             .insert({
@@ -124,8 +144,8 @@ export const handler = async (event) => {
               scopes: tokenRow.scopes || null
             });
 
-          response = await fetchOffers(refreshed.access_token);
-          console.log('📡 Retry after refresh - status:', response.status);
+          response = await fetchOffers(refreshed.access_token, primaryLocale);
+          console.info('📡 Retry after refresh - status:', response.status);
         } else {
           console.error('❌ refresh_token failed');
           return { statusCode: 401, body: JSON.stringify({ error: 'token_expired' }) };
@@ -136,27 +156,35 @@ export const handler = async (event) => {
       }
     }
 
+    // 5.b) Si 400 avec 25709 (ou 25707), réessayer avec l'autre locale autorisée
     if (!response.ok && response.status === 400) {
       const raw = await readText(response);
-      if (raw.includes('"errorId":25707') || raw.includes('"errorId":25709')) {
-        console.warn('🔁 Fallback retry for 25707/25709: retrying with minimal headers');
+      if (raw.includes('"errorId":25709') || raw.includes('"errorId":25707')) {
+        console.warn('🔁 Fallback retry for 25707/25709 with alternate locale:', fallbackLocale);
         response = await fetch(offersUrl.toString(), {
           method: 'GET',
-          headers: { Authorization: `Bearer ${tokenRow.access_token}` }
+          headers: makeHeaders(tokenRow.access_token, fallbackLocale)
         });
-        console.log('📡 Fallback retry - status:', response.status);
+        console.info('📡 Fallback retry - status:', response.status);
+        if (!response.ok) {
+          const raw2 = await readText(response);
+          console.error('❌ eBay API error after locale fallback:', raw2);
+          return { statusCode: 400, body: raw2 || JSON.stringify({ error: 'ebay_error_400' }) };
+        }
       } else {
         console.error('❌ eBay API error (400)', raw);
         return { statusCode: 400, body: raw || JSON.stringify({ error: 'ebay_error_400' }) };
       }
     }
 
+    // 6) Gestion erreurs HTTP restantes
     if (!response.ok) {
       const raw = await readText(response);
       console.error('❌ eBay API error:', raw);
       return { statusCode: response.status, body: raw || JSON.stringify({ error: 'ebay_error' }) };
     }
 
+    // 7) Parse payload
     const text = await readText(response);
     const json = parseJsonSafe(text);
     if (!json) {
@@ -167,7 +195,7 @@ export const handler = async (event) => {
     const offers = Array.isArray(json.offers) ? json.offers : [];
     const defaultCurrency = account.currency || 'EUR';
 
-    console.log('📦 Processing', offers.length, 'offers');
+    console.info('📦 Processing', offers.length, 'offers');
 
     const items = offers.map((offer) => ({
       provider: 'ebay',
@@ -185,7 +213,7 @@ export const handler = async (event) => {
       updated_at: new Date().toISOString()
     })).filter((it) => it.remote_id);
 
-    console.log('💾 Upserting', items.length, 'items');
+    console.info('💾 Upserting', items.length, 'items');
 
     if (items.length > 0) {
       const { error: upsertError } = await supabaseService
@@ -198,7 +226,7 @@ export const handler = async (event) => {
       }
     }
 
-    console.log('✅ Successfully synced', items.length, 'offers');
+    console.info('✅ Successfully synced', items.length, 'offers');
 
     return {
       statusCode: 200,
@@ -219,7 +247,7 @@ export const handler = async (event) => {
 async function refreshAccessToken({ client_id, client_secret, refresh_token, scopes }) {
   const endpoint = 'https://api.ebay.com/identity/v1/oauth2/token';
 
-  console.log('🔐 Refreshing access token...');
+  console.info('🔐 Refreshing access token...');
 
   try {
     const credentials = Buffer.from(`${client_id}:${client_secret}`).toString('base64');
@@ -232,8 +260,8 @@ async function refreshAccessToken({ client_id, client_secret, refresh_token, sco
     const resp = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Authorization: `Basic ${credentials}`
+        Authorization: `Basic ${credentials}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
       },
       body: body.toString()
     });
@@ -245,18 +273,18 @@ async function refreshAccessToken({ client_id, client_secret, refresh_token, sco
       return null;
     }
 
-    try {
-      const json = JSON.parse(text);
-      return {
-        access_token: json.access_token,
-        expires_in: json.expires_in || null,
-        token_type: json.token_type || null,
-        scope: json.scope || null
-      };
-    } catch {
+    const json = (() => { try { return JSON.parse(text); } catch { return null; } })();
+    if (!json || !json.access_token) {
       console.error('❌ invalid JSON on refresh', text.substring(0, 200));
       return null;
     }
+
+    return {
+      access_token: json.access_token,
+      expires_in: json.expires_in || null,
+      token_type: json.token_type || null,
+      scope: json.scope || null
+    };
   } catch (e) {
     console.error('❌ refresh_access_token_exception', e && e.message ? e.message : e);
     return null;
