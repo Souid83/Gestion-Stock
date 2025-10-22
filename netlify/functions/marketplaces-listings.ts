@@ -448,7 +448,8 @@ export const handler = async (event: any) => {
     })).filter((it) => it.remote_id);
 
     // Strip non-persistent fields before DB upsert
-    const dbItems = items.map(({ qty_ebay, qty_app, ...rest }) => rest);
+    // Do not persist product_id (only for UI), nor qty_ebay/qty_app
+    const dbItems = items.map(({ qty_ebay, qty_app, product_id, ...rest }) => rest);
 
     console.info('💾 Upserting', items.length, 'items');
 
