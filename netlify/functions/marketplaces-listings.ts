@@ -349,9 +349,10 @@ export const handler = async (event: any) => {
     skus = skus.slice(0, MAX_SKUS_PER_RUN);
     console.info('🔎 Processing', skus.length, 'SKUs (max', MAX_SKUS_PER_RUN, ')');
 
-    // Quantities maps
+    // Quantities + mappings maps
     const qtyEbayBySku: Record<string, number> = (inv && (inv as any).qtyBySku) || {};
     let qtyAppBySku: Record<string, number | null> = {};
+    let productIdBySku: Record<string, string> = {};
     try {
       // Get mappings
       const { data: mappings } = await supabaseService
@@ -372,12 +373,16 @@ export const handler = async (event: any) => {
           qtyByProductId[s.id] = typeof s.shared_quantity === 'number' ? s.shared_quantity : (s.shared_quantity ?? null);
         });
         (mappings || []).forEach((m: any) => {
-          if (m?.remote_sku && m?.product_id) qtyAppBySku[m.remote_sku] = (qtyByProductId[m.product_id] ?? null);
+          if (m?.remote_sku && m?.product_id) {
+            productIdBySku[m.remote_sku] = m.product_id;
+            qtyAppBySku[m.remote_sku] = (qtyByProductId[m.product_id] ?? null);
+          }
         });
       }
       console.info('🧮 Qty maps built — ebay:', Object.keys(qtyEbayBySku).length, 'app:', Object.keys(qtyAppBySku).length);
+      console.info('🔗 mappings found:', Object.keys(productIdBySku).length);
     } catch (e) {
-      console.warn('⚠️ qty mapping failed', (e as any)?.message || e);
+      console.warn('⚠️ qty/mapping build failed', (e as any)?.message || e);
     }
 
     const allOffers = [];
@@ -436,6 +441,7 @@ export const handler = async (event: any) => {
         availableQuantity: (offer && typeof offer.availableQuantity !== 'undefined' ? offer.availableQuantity : null),
         format: (offer && (offer.format || offer.offerType) ? (offer.format || offer.offerType) : null)
       },
+      product_id: offer && offer.sku ? (productIdBySku[offer.sku] ?? null) : null,
       qty_ebay: offer && offer.sku ? (qtyEbayBySku[offer.sku] ?? null) : null,
       qty_app: offer && offer.sku ? (qtyAppBySku[offer.sku] ?? null) : null,
       updated_at: new Date().toISOString()
