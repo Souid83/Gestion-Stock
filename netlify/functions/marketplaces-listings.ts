@@ -125,6 +125,14 @@ export const handler = async (event: any) => {
     const readText = async (resp: Response): Promise<string> => { try { return await resp.text(); } catch { return ''; } };
     const parseJsonSafe = (txt: string): any => { try { return JSON.parse(txt); } catch { return null; } };
 
+    const normalizeListingStatus = (s?: string): 'ok' | 'pending' | 'failed' | 'unmapped' => {
+      const v = (s || '').toUpperCase();
+      if (v.includes('PUBLISH') || v.includes('ACTIVE') || v === 'PUBLISHED') return 'ok';
+      if (v.includes('PEND') || v.includes('READY') || v.includes('PREP')) return 'pending';
+      if (v.includes('FAIL') || v.includes('ERROR') || v.includes('BLOCK')) return 'failed';
+      return 'unmapped';
+    };
+
     const fetchInventoryItems = async (token: string) => {
       const url = new URL('/sell/inventory/v1/inventory_item', host);
       url.searchParams.set('limit', String(limit));
@@ -364,7 +372,8 @@ export const handler = async (event: any) => {
       price_currency: offer && offer.pricingSummary && offer.pricingSummary.price && offer.pricingSummary.price.currency
         ? offer.pricingSummary.price.currency
         : defaultCurrency,
-      status_sync: offer && offer.listingStatus ? offer.listingStatus : 'UNKNOWN',
+      status_sync: normalizeListingStatus(offer && offer.listingStatus ? offer.listingStatus : undefined),
+      metadata: { listingStatus: (offer && offer.listingStatus ? offer.listingStatus : null) },
       updated_at: new Date().toISOString()
     })).filter((it) => it.remote_id);
 
