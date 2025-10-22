@@ -24,6 +24,7 @@ import { OrderList } from './components/Billing/OrderList';
 import { OrderForm } from './components/Billing/OrderForm';
 import { CreditNoteList } from './components/Billing/CreditNoteList';
 import { CreditNoteForm } from './components/Billing/CreditNoteForm';
+import { DocumentTypesPage } from './pages/billing/DocumentTypesPage';
 // Import des composants de gestion des clients
 import { Customers } from './pages/Customers';
 // Import des composants de paramètres
@@ -74,14 +75,121 @@ function App() {
     } catch {}
   }, [sidebarCollapsed]);
 
+  // Deep-linking and graceful routing without react-router:
+  // - Accepts ?page=<known-page>
+  // - Maps pathnames like /billing/invoices/new to the internal page ids (e.g., invoices-new)
+  // - Keeps existing marketplace-pricing behavior
   useEffect(() => {
-    const url = new URL(window.location.href);
-    const page = url.searchParams.get("page");
-    const provider = url.searchParams.get("provider");
-    const connected = url.searchParams.get("connected");
-    if (page === "marketplace-pricing" || (provider === "ebay" && connected === "1")) {
-      setCurrentPage("marketplace-pricing");
-    }
+    const ALLOWED = new Set<string>([
+      // Billing
+      'quotes-list','quotes-new','quotes-edit',
+      'invoices-list','invoices-new','invoices-edit',
+      'orders-list','orders-new','orders-edit',
+      'credit-notes-list','credit-notes-new','credit-notes-edit',
+      'document-types',
+      // Core pages already used in the app
+      'dashboard','product-list','product-stock','stock-management',
+      'category-management','variant-management','shipping-boxes',
+      'select-type','add-product','add-product-pam','add-product-multiple',
+      'customers',
+      // Settings / tools / marketplace
+      'mail-settings','invoice-settings','settings-ebay',
+      'marketplace-pricing','repair-calculator','atelier-prise-en-charge'
+    ]);
+
+    const mapPathToPage = (pathname: string): string | null => {
+      const p = pathname.replace(/\/+$/, '');
+      // Normalize empty to root
+      if (p === '' || p === '/') return null;
+
+      // Billing aliases
+      if (p === '/billing/invoices') return 'invoices-list';
+      if (p === '/billing/invoices/new') return 'invoices-new';
+      if (p.startsWith('/billing/invoices/edit')) return 'invoices-edit';
+
+      if (p === '/billing/quotes') return 'quotes-list';
+      if (p === '/billing/quotes/new') return 'quotes-new';
+      if (p.startsWith('/billing/quotes/edit')) return 'quotes-edit';
+
+      if (p === '/billing/credit-notes') return 'credit-notes-list';
+      if (p === '/billing/credit-notes/new') return 'credit-notes-new';
+      if (p.startsWith('/billing/credit-notes/edit')) return 'credit-notes-edit';
+
+      if (p === '/billing/document-types') return 'document-types';
+
+      // Orders (if deep-linked)
+      if (p === '/billing/orders') return 'orders-list';
+      if (p === '/billing/orders/new') return 'orders-new';
+      if (p.startsWith('/billing/orders/edit')) return 'orders-edit';
+
+      // Marketplace pricing
+      if (p === '/marketplace/pricing') return 'marketplace-pricing';
+
+      // Settings
+      if (p === '/settings/invoice') return 'invoice-settings';
+      if (p === '/settings/mail') return 'mail-settings';
+      if (p === '/settings/ebay') return 'settings-ebay';
+
+      // Products sections
+      if (p === '/products') return 'product-list';
+      if (p === '/products/stock') return 'product-stock';
+      if (p === '/products/stock-management') return 'stock-management';
+      if (p === '/products/category-management') return 'category-management';
+      if (p === '/products/variant-management') return 'variant-management';
+      if (p === '/products/shipping-boxes') return 'shipping-boxes';
+      if (p === '/products/select-type') return 'select-type';
+      if (p === '/products/add') return 'add-product';
+      if (p === '/products/add-pam') return 'add-product-pam';
+      if (p === '/products/add-multiple') return 'add-product-multiple';
+
+      // Customers
+      if (p === '/customers') return 'customers';
+
+      // Tools / Workshop
+      if (p === '/tools/repair-calculator') return 'repair-calculator';
+      if (p === '/atelier/prise-en-charge') return 'atelier-prise-en-charge';
+
+      return null;
+    };
+
+    const applyFromLocation = () => {
+      const url = new URL(window.location.href);
+      const page = url.searchParams.get('page');
+      const provider = url.searchParams.get('provider');
+      const connected = url.searchParams.get('connected');
+
+      // 1) Pathname mapping (e.g., /billing/invoices/new)
+      const mapped = mapPathToPage(window.location.pathname);
+      if (mapped && ALLOWED.has(mapped)) {
+        // Normalize URL to include ?page=mapped for consistency (without reload)
+        if (!page) {
+          const u = new URL(window.location.href);
+          u.searchParams.set('page', mapped);
+          window.history.replaceState({}, '', `${u.pathname}${u.search}${u.hash}`);
+        }
+        setCurrentPage(mapped);
+        return;
+      }
+
+      // 2) Marketplace special case (kept)
+      if (page === 'marketplace-pricing' || (provider === 'ebay' && connected === '1')) {
+        setCurrentPage('marketplace-pricing');
+        return;
+      }
+
+      // 3) Generic ?page support with whitelist
+      if (page && ALLOWED.has(page)) {
+        setCurrentPage(page);
+      }
+    };
+
+    applyFromLocation();
+
+    const onPop = () => {
+      try { applyFromLocation(); } catch {}
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
   }, []);
 
   const euro = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' });
@@ -320,6 +428,8 @@ function App() {
           return <CreditNoteForm />;
         case 'credit-notes-edit':
           return <CreditNoteForm creditNoteId={sessionStorage.getItem('editCreditNoteId') || undefined} />;
+        case 'document-types':
+          return <DocumentTypesPage />;
         // Ajout de la route pour la gestion des clients
         case 'customers':
           return <Customers />;
@@ -778,8 +888,8 @@ function App() {
               href="#"
               onClick={() => setShowBillingMenu(!showBillingMenu)}
               className={`px-4 py-2 flex items-center justify-between text-gray-300 hover:bg-[#24303a] ${
-                currentPage.includes('invoice') || currentPage.includes('quote') || 
-                currentPage.includes('order') || currentPage.includes('credit-note') ? 'bg-[#24303a]' : ''
+                currentPage.includes('invoice') || currentPage.includes('quote') ||
+                currentPage.includes('order') || currentPage.includes('credit-note') || currentPage.includes('document-types') ? 'bg-[#24303a]' : ''
               }`}
             >
               <div className="flex items-center space-x-3">
@@ -820,6 +930,13 @@ function App() {
                   className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
                 >
                   Avoirs
+                </a>
+                <a
+                  href="#"
+                  onClick={() => setCurrentPage('document-types')}
+                  className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
+                >
+                  Typages
                 </a>
               </div>
             )}
