@@ -24,6 +24,8 @@ interface PricingListing {
   product_id: string | null;
   sync_status: 'ok' | 'pending' | 'failed' | 'unmapped';
   is_mapped: boolean;
+  qty_ebay?: number | null;
+  qty_app?: number | null;
 }
 
 interface FilterState {
@@ -80,6 +82,7 @@ export default function MarketplacePricing() {
   const [productIdInput, setProductIdInput] = useState('');
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [totalCount, setTotalCount] = useState(0);
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -154,6 +157,7 @@ export default function MarketplacePricing() {
       setError(null);
       try {
         console.log('📞 Fetching eBay listings...');
+        const offset = String((currentPage - 1) * itemsPerPage);
         const params = new URLSearchParams({
           provider: selectedProvider,
           account_id: selectedAccountId,
@@ -161,7 +165,8 @@ export default function MarketplacePricing() {
           only_unmapped: filters.unmappedFirst ? 'true' : 'false',
           status: filters.statusFilter,
           page: currentPage.toString(),
-          limit: itemsPerPage.toString()
+          limit: itemsPerPage.toString(),
+          offset
         });
         const response = await fetch(`/.netlify/functions/marketplaces-listings?${params}`);
         console.log(`📥 Response status: ${response.status}`);
@@ -193,6 +198,7 @@ export default function MarketplacePricing() {
 
         const data = await response.json();
         console.log(`✅ Fetched ${data.items?.length || 0} listings`);
+        setTotalCount(data.total || data.count || 0);
 
         // Map backend shape → UI PricingListing shape
         const mapped: PricingListing[] = (data.items || []).map((it: any) => {
@@ -217,7 +223,9 @@ export default function MarketplacePricing() {
             internal_price: null,         // A compléter si jointure interne
             product_id: it?.product_id || null,
             sync_status: status,
-            is_mapped: !!it?.product_id || false
+            is_mapped: !!it?.product_id || false,
+            qty_ebay: typeof it?.qty_ebay === 'number' ? it.qty_ebay : (it?.qty_ebay ?? null),
+            qty_app: typeof it?.qty_app === 'number' ? it.qty_app : (it?.qty_app ?? null)
           };
         });
 
@@ -376,6 +384,31 @@ export default function MarketplacePricing() {
       setToast({ message: `Erreur: ${err.message}`, type: 'error' });
     } finally {
       setActionLoading({ ...actionLoading, [remoteId]: false });
+    }
+  };
+
+  const applyQtyToEbay = async (listing: PricingListing) => {
+    if (!selectedAccountId || listing.qty_app == null || !listing.remote_sku) return;
+    setActionLoading({ ...actionLoading, [listing.remote_id]: true });
+    try {
+      const resp = await fetch('/.netlify/functions/marketplaces-stock-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          account_id: selectedAccountId,
+          items: [{ sku: listing.remote_sku, quantity: listing.qty_app }]
+        })
+      });
+      const resJson = await resp.json().catch(() => ({} as any));
+      if (!resp.ok) throw new Error(resJson?.error || `HTTP ${resp.status}`);
+      setListings(prev =>
+        prev.map(l => l.remote_id === listing.remote_id ? { ...l, qty_ebay: listing.qty_app } : l)
+      );
+      setToast({ message: 'Quantité mise à jour sur eBay', type: 'success' });
+    } catch (err: any) {
+      setToast({ message: `Erreur MAJ quantité: ${err.message}`, type: 'error' });
+    } finally {
+      setActionLoading({ ...actionLoading, [listing.remote_id]: false });
     }
   };
 
@@ -555,13 +588,13 @@ export default function MarketplacePricing() {
                         Prix interne
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Prix eBay
+                        Prix eBay (EUR)
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Devise
+                        Qté eBay
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Équiv. EUR
+                        Qté app
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Δ
@@ -576,7 +609,6 @@ export default function MarketplacePricing() {
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
                     {filteredListings
-                      .slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)
                       .map(listing => (
                         <tr
                           key={listing.remote_id}
@@ -603,14 +635,16 @@ export default function MarketplacePricing() {
                             }
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-700">
-                            {listing.price_currency}
+                            {listing.qty_ebay != null
+                              ? listing.qty_ebay
+                              : <span className="text-gray-400">—</span>
+                            }
                           </td>
-                          <td className="px-4 py-3 text-sm">
-                            <CurrencyCell
-                              price={listing.price}
-                              currency={listing.price_currency}
-                              priceEur={listing.price_eur}
-                            />
+                          <td className="px-4 py-3 text-sm text-gray-700">
+                            {listing.qty_app != null
+                              ? listing.qty_app
+                              : <span className="text-gray-400">—</span>
+                            }
                           </td>
                           <td className="px-4 py-3 text-sm">
                             {formatDelta(calculateDelta(listing.price_eur, listing.internal_price))}
@@ -652,6 +686,15 @@ export default function MarketplacePricing() {
                               >
                                 Créer
                               </button>
+                              {listing.qty_app != null && listing.remote_sku && (
+                                <button
+                                  onClick={() => applyQtyToEbay(listing)}
+                                  disabled={actionLoading[listing.remote_id]}
+                                  className="px-3 py-1 bg-indigo-600 text-white text-xs rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  Qté app → eBay
+                                </button>
+                              )}
                               <button
                                 onClick={() => handleIgnore(listing.remote_id)}
                                 disabled={actionLoading[listing.remote_id]}
@@ -669,27 +712,27 @@ export default function MarketplacePricing() {
 
               {/* Pagination */}
               <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-t border-gray-200 rounded-b-lg">
-                <div className="text-sm text-gray-700">
-                  {filteredListings.length > 0 ? (
-                    `${(currentPage - 1) * itemsPerPage + 1}-${Math.min(currentPage * itemsPerPage, filteredListings.length)} sur ${filteredListings.length}`
-                  ) : '0 résultat'}
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                    disabled={currentPage === 1}
-                    className="px-3 py-1 border border-gray-300 rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
-                  >
-                    Précédent
-                  </button>
-                  <button
-                    onClick={() => setCurrentPage(p => p + 1)}
-                    disabled={currentPage * itemsPerPage >= filteredListings.length}
-                    className="px-3 py-1 border border-gray-300 rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
-                  >
-                    Suivant
-                  </button>
-                </div>
+              <div className="text-sm text-gray-700">
+                {totalCount > 0 ? (
+                  `${(currentPage - 1) * itemsPerPage + 1}-${Math.min(currentPage * itemsPerPage, totalCount)} sur ${totalCount}`
+                ) : '0 résultat'}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className="px-3 py-1 border border-gray-300 rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                >
+                  Précédent
+                </button>
+                <button
+                  onClick={() => setCurrentPage(p => p + 1)}
+                  disabled={currentPage * itemsPerPage >= totalCount}
+                  className="px-3 py-1 border border-gray-300 rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                >
+                  Suivant
+                </button>
+              </div>
               </div>
             </>
           )}
