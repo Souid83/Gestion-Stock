@@ -353,6 +353,7 @@ export const handler = async (event: any) => {
     const qtyEbayBySku: Record<string, number> = (inv && (inv as any).qtyBySku) || {};
     let qtyAppBySku: Record<string, number | null> = {};
     let productIdBySku: Record<string, string> = {};
+    let internalPriceBySku: Record<string, number | null> = {};
     try {
       // Get mappings
       const { data: mappings } = await supabaseService
@@ -364,23 +365,52 @@ export const handler = async (event: any) => {
 
       const productIds = Array.isArray(mappings) ? mappings.map((m: any) => m.product_id).filter(Boolean) : [];
       if (productIds.length > 0) {
-        const { data: stocks } = await supabaseService
+        // Load shared quantity (view) + fallback quantities and internal price (table)
+        const { data: vw } = await supabaseService
           .from('products_with_stock')
           .select('id, shared_quantity')
           .in('id', productIds);
+
+        const { data: prodRows } = await supabaseService
+          .from('products')
+          .select('id, stock_total, stock, retail_price')
+          .in('id', productIds);
+
         const qtyByProductId: Record<string, number | null> = {};
-        (stocks || []).forEach((s: any) => {
-          qtyByProductId[s.id] = typeof s.shared_quantity === 'number' ? s.shared_quantity : (s.shared_quantity ?? null);
+        const internalPriceByProductId: Record<string, number | null> = {};
+
+        // Build internal price map + quantity fallbacks from products table
+        (prodRows || []).forEach((p: any) => {
+          internalPriceByProductId[p.id] =
+            typeof p.retail_price === 'number' ? p.retail_price : (p.retail_price ?? null);
+
+          // Fallback priority: shared_quantity (view) → stock_total (table) → stock (table)
+          const shared = (vw || []).find((s: any) => s.id === p.id)?.shared_quantity;
+          const candidates = [shared, p.stock_total, p.stock];
+          const picked = candidates.find((q) => typeof q === 'number');
+          qtyByProductId[p.id] = typeof picked === 'number' ? picked : null;
         });
+
+        // If view returned a shared_quantity, it takes precedence
+        (vw || []).forEach((s: any) => {
+          if (typeof s.shared_quantity === 'number') {
+            qtyByProductId[s.id] = s.shared_quantity;
+          }
+        });
+
+        const ipBySku: Record<string, number | null> = {};
         (mappings || []).forEach((m: any) => {
           if (m?.remote_sku && m?.product_id) {
             productIdBySku[m.remote_sku] = m.product_id;
             qtyAppBySku[m.remote_sku] = (qtyByProductId[m.product_id] ?? null);
+            ipBySku[m.remote_sku] = internalPriceByProductId[m.product_id] ?? null;
           }
         });
+        internalPriceBySku = ipBySku;
       }
       console.info('🧮 Qty maps built — ebay:', Object.keys(qtyEbayBySku).length, 'app:', Object.keys(qtyAppBySku).length);
       console.info('🔗 mappings found:', Object.keys(productIdBySku).length);
+      console.info('🏷 internal_price set for:', Object.keys(internalPriceBySku).length);
     } catch (e) {
       console.warn('⚠️ qty/mapping build failed', (e as any)?.message || e);
     }
@@ -434,7 +464,7 @@ export const handler = async (event: any) => {
       price_currency: offer && offer.pricingSummary && offer.pricingSummary.price && offer.pricingSummary.price.currency
         ? offer.pricingSummary.price.currency
         : defaultCurrency,
-      status_sync: normalizeListingStatus(offer && offer.listingStatus ? offer.listingStatus : undefined),
+      status_sync: (offer && offer.sku && productIdBySku[offer.sku]) ? 'ok' : normalizeListingStatus(offer && offer.listingStatus ? offer.listingStatus : undefined),
       metadata: {
         listingStatus: (offer && offer.listingStatus ? offer.listingStatus : null),
         marketplaceId: (offer && offer.marketplaceId ? offer.marketplaceId : null),
@@ -442,6 +472,7 @@ export const handler = async (event: any) => {
         format: (offer && (offer.format || offer.offerType) ? (offer.format || offer.offerType) : null)
       },
       product_id: offer && offer.sku ? (productIdBySku[offer.sku] ?? null) : null,
+      internal_price: offer && offer.sku ? (internalPriceBySku[offer.sku] ?? null) : null,
       qty_ebay: offer && offer.sku ? (qtyEbayBySku[offer.sku] ?? null) : null,
       qty_app: offer && offer.sku ? (qtyAppBySku[offer.sku] ?? null) : null,
       updated_at: new Date().toISOString()
@@ -449,7 +480,7 @@ export const handler = async (event: any) => {
 
     // Strip non-persistent fields before DB upsert
     // Do not persist product_id (only for UI), nor qty_ebay/qty_app
-    const dbItems = items.map(({ qty_ebay, qty_app, product_id, ...rest }) => rest);
+    const dbItems = items.map(({ qty_ebay, qty_app, product_id, internal_price, ...rest }) => rest);
 
     console.info('💾 Upserting', items.length, 'items');
 
