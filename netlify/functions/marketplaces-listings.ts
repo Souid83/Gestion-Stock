@@ -441,12 +441,15 @@ export const handler = async (event: any) => {
       updated_at: new Date().toISOString()
     })).filter((it) => it.remote_id);
 
+    // Strip non-persistent fields before DB upsert
+    const dbItems = items.map(({ qty_ebay, qty_app, ...rest }) => rest);
+
     console.info('💾 Upserting', items.length, 'items');
 
     if (items.length > 0) {
       const { error: upsertError } = await supabaseService
         .from('marketplace_listings')
-        .upsert(items, { onConflict: 'provider,marketplace_account_id,remote_id' });
+        .upsert(dbItems, { onConflict: 'provider,marketplace_account_id,remote_id' });
       if (upsertError) {
         console.error('❌ upsert_failed', upsertError);
         return srvError('upsert_failed', upsertError.message || 'unknown');
