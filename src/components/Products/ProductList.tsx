@@ -1031,7 +1031,13 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                   const isExpanded = expandedProducts.has(product.id);
                   const parentInline = parentForMirror[product.id] as any;
                   const showParentInline = !!((product.parent_id || (product as any).mirror_of) && expandedParentForMirror.has(product.id) && parentInline);
-                  const parentTotalStock = showParentInline ? (parentInline?.stocks || []).reduce((sum: number, s: any) => sum + (s.quantite || 0), 0) : 0;
+                  const parentTotalStock = showParentInline
+                    ? (
+                        Array.isArray(parentInline?.stocks) && parentInline.stocks.length > 0
+                          ? (parentInline.stocks as any[]).reduce((sum: number, s: any) => sum + (s?.quantite || 0), 0)
+                          : (typeof parentInline?.stock_total === 'number' ? parentInline.stock_total : 0)
+                      )
+                    : 0;
                   const parentAlertVal = showParentInline ? (parentInline?.stock_alert ?? null) : null;
                   const parentIsLowStock = showParentInline ? (parentAlertVal !== null && (parentInline?.stock_total ?? parentTotalStock) <= parentAlertVal) : false;
 
@@ -1141,6 +1147,56 @@ export const ProductList: React.FC<ProductListProps> = ({ products: initialProdu
                                           .maybeSingle();
                                         parentRef = data || null;
                                       }
+
+                                      // Hydrate reliable stock for parent: pool -> view -> table
+                                      try {
+                                        let resolvedQty: number | null = null;
+
+                                        // 1) Pool quantity via shared_stocks if linked
+                                        if (parentRef?.shared_stock_id) {
+                                          const { data: pool } = await supabase
+                                            .from('shared_stocks')
+                                            .select('quantity')
+                                            .eq('id', parentRef.shared_stock_id as any)
+                                            .maybeSingle();
+                                          const poolQty = (pool as any)?.quantity;
+                                          if (typeof poolQty === 'number') resolvedQty = poolQty;
+                                        }
+
+                                        // 2) View products_with_stock.shared_quantity
+                                        if (resolvedQty === null) {
+                                          const { data: vw } = await supabase
+                                            .from('products_with_stock')
+                                            .select('shared_quantity')
+                                            .eq('id', pid as any)
+                                            .maybeSingle();
+                                          const vwQty = (vw as any)?.shared_quantity;
+                                          if (typeof vwQty === 'number') resolvedQty = vwQty;
+                                        }
+
+                                        // 3) Fallbacks: stock_total then sum(stocks)
+                                        if (resolvedQty === null) {
+                                          if (typeof parentRef?.stock_total === 'number') {
+                                            resolvedQty = parentRef.stock_total;
+                                          } else if (Array.isArray(parentRef?.stocks) && parentRef.stocks.length > 0) {
+                                            resolvedQty = (parentRef.stocks as any[]).reduce((sum: number, s: any) => sum + (s?.quantite || 0), 0);
+                                          } else {
+                                            resolvedQty = 0;
+                                          }
+                                        }
+
+                                        // Normalize shape for UI reducers
+                                        parentRef = {
+                                          ...parentRef,
+                                          stock_total: resolvedQty,
+                                          stocks: Array.isArray(parentRef?.stocks) && parentRef.stocks.length > 0
+                                            ? parentRef.stocks
+                                            : [{ stock_id: 'POOL', stock: { name: 'POOL' }, quantite: resolvedQty }]
+                                        };
+                                      } catch (e) {
+                                        console.warn('Parent stock hydration failed:', e);
+                                      }
+
                                       setParentForMirror(prev => ({ ...prev, [product.id]: parentRef as any }));
                                       setExpandedParentForMirror(prev => {
                                         const next = new Set(prev);
