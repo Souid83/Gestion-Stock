@@ -373,20 +373,40 @@ export const handler = async (event: any) => {
 
         const { data: prodRows } = await supabaseService
           .from('products')
-          .select('id, stock_total, stock, retail_price')
+          .select('id, shared_stock_id, stock_total, stock, retail_price')
           .in('id', productIds);
 
         const qtyByProductId: Record<string, number | null> = {};
         const internalPriceByProductId: Record<string, number | null> = {};
+
+        // Load pool quantities from shared_stocks for products that belong to a shared pool
+        const sharedStockIds = Array.from(new Set((prodRows || []).map((p: any) => p.shared_stock_id).filter(Boolean)));
+        let poolQtyByStockId: Record<string, number | null> = {};
+        if (sharedStockIds.length > 0) {
+          const { data: pools } = await supabaseService
+            .from('shared_stocks')
+            .select('id, quantity')
+            .in('id', sharedStockIds);
+          (pools || []).forEach((s: any) => {
+            if (s && s.id) {
+              poolQtyByStockId[s.id] = typeof s.quantity === 'number' ? s.quantity : (s.quantity ?? null);
+            }
+          });
+        }
 
         // Build internal price map + quantity fallbacks from products table
         (prodRows || []).forEach((p: any) => {
           internalPriceByProductId[p.id] =
             typeof p.retail_price === 'number' ? p.retail_price : (p.retail_price ?? null);
 
-          // Fallback priority: shared_quantity (view) → stock_total (table) → stock (table)
+          // Fallback priority:
+          // 1) shared_stocks.quantity (pool) if shared_stock_id present
+          // 2) shared_quantity from view
+          // 3) products.stock_total
+          // 4) products.stock
+          const poolQty = p.shared_stock_id ? poolQtyByStockId[p.shared_stock_id] : null;
           const shared = (vw || []).find((s: any) => s.id === p.id)?.shared_quantity;
-          const candidates = [shared, p.stock_total, p.stock];
+          const candidates = [poolQty, shared, p.stock_total, p.stock];
           const picked = candidates.find((q) => typeof q === 'number');
           qtyByProductId[p.id] = typeof picked === 'number' ? picked : null;
         });
