@@ -49,7 +49,8 @@ const parseJson = (txt: string): any => { try { return JSON.parse(txt); } catch 
 const authHeaders = (token: string): Record<string, string> => ({
   Authorization: `Bearer ${token}`,
   Accept: 'application/json',
-  'Content-Type': 'application/json'
+  'Content-Type': 'application/json',
+  'Accept-Language': 'en-US'
 });
 
 async function refreshAccessToken({
@@ -245,6 +246,7 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
           })
         );
 
+      console.log('🌐 bulk_migrate_listing headers include Accept-Language: en-US');
       console.log("🧩 Using tokenRow:", tokenRow);
       let resp = await doCall();
       let raw = await readText(resp);
