@@ -49,7 +49,8 @@ const parseJson = (txt: string): any => { try { return JSON.parse(txt); } catch 
 const authHeaders = (token: string): Record<string, string> => ({
   Authorization: `Bearer ${token}`,
   Accept: 'application/json',
-  'Content-Type': 'application/json'
+  'Content-Type': 'application/json',
+  'Accept-Language': 'en-US'
 });
 
 async function refreshAccessToken({
@@ -120,6 +121,14 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
     listingIds = Array.from(new Set(listingIds));
     if (listingIds.length === 0)
       return { statusCode: 400, headers: JSON_HEADERS, body: JSON.stringify({ error: 'no_listing_ids' }) };
+
+    // Optional marketplace id (body preferred, falls back to query)
+    const marketplaceId: string | null =
+      (typeof body?.marketplace_id === 'string' && body.marketplace_id.trim().length > 0)
+        ? body.marketplace_id.trim()
+        : ((typeof qs.marketplace_id === 'string' && qs.marketplace_id.trim().length > 0)
+          ? qs.marketplace_id.trim()
+          : null);
 
     const { data: account, error: accErr } = await supabaseService
       .from('marketplace_accounts')
@@ -241,11 +250,17 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
           fetch(migrateUrl, {
             method: 'POST',
             headers: authHeaders(accessToken),
-            body: JSON.stringify({ requests: batch.map((id: string) => ({ listingId: id })) })
+            body: JSON.stringify({
+              requests: batch.map((id: string) =>
+                marketplaceId ? ({ listingId: id, marketplaceId }) : ({ listingId: id })
+              )
+            })
           })
         );
 
+      console.log('🌐 bulk_migrate_listing headers include Accept-Language: en-US');
       console.log("🧩 Using tokenRow:", tokenRow);
+      if (marketplaceId) console.log('🌍 Using marketplaceId:', marketplaceId);
       let resp = await doCall();
       let raw = await readText(resp);
 
@@ -263,9 +278,27 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
 
       if (!resp.ok) {
         const js = parseJson(raw);
-        const errorObj = js?.errors || [{ message: raw?.substring(0, 200) || 'unknown_error' }];
-        for (const lid of batch)
-          results.push({ listingId: lid, status: 'FAILED', errors: Array.isArray(errorObj) ? errorObj : [errorObj] });
+        // eBay can return an envelope with "responses" per listing
+        if (js && Array.isArray(js.responses) && js.responses.length > 0) {
+          for (const r of js.responses) {
+            const errs = Array.isArray(r?.errors) ? r.errors : [{ message: raw?.substring(0, 500) || 'unknown_error' }];
+            const lid = r?.listingId || 'unknown';
+            const status: 'SUCCESS' | 'FAILED' = r?.statusCode === 200 ? 'SUCCESS' : 'FAILED';
+            results.push({
+              listingId: lid,
+              status,
+              sku: r?.sku || null,
+              offerId: r?.offerId || null,
+              errors: errs,
+              raw: r
+            });
+          }
+        } else {
+          const errorObj = js?.errors || [{ message: raw?.substring(0, 500) || 'unknown_error' }];
+          for (const lid of batch) {
+            results.push({ listingId: lid, status: 'FAILED', errors: Array.isArray(errorObj) ? errorObj : [errorObj] });
+          }
+        }
       } else {
         const js = parseJson(raw);
         const items = Array.isArray(js?.responses)
