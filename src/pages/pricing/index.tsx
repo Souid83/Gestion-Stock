@@ -83,6 +83,11 @@ export default function MarketplacePricing() {
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [totalCount, setTotalCount] = useState(0);
+  const [needsReview, setNeedsReview] = useState<any[]>([]);
+  const [showQtySyncPrompt, setShowQtySyncPrompt] = useState(false);
+  const [itemsToSync, setItemsToSync] = useState<{ sku: string; quantity: number }[]>([]);
+  const [autoLinkAttempted, setAutoLinkAttempted] = useState(false);
+  const [reloadToken, setReloadToken] = useState(0);
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -147,6 +152,11 @@ export default function MarketplacePricing() {
 
     fetchAccounts();
   }, [selectedProvider]);
+
+  // Reset auto-link attempt when page/account changes
+  useEffect(() => {
+    setAutoLinkAttempted(false);
+  }, [selectedAccountId, currentPage]);
 
   // Fetch listings quand accountId, filters ou page changent
   useEffect(() => {
@@ -230,6 +240,42 @@ export default function MarketplacePricing() {
         });
 
         setListings(mapped);
+
+        // Auto-link by SKU on first load for this page, then refetch to display qty_app
+        if (!autoLinkAttempted) {
+          setAutoLinkAttempted(true);
+          try {
+            const unmapped = mapped.filter(l => !l.is_mapped && l.remote_sku);
+            if (unmapped.length > 0) {
+              const { data: { session } } = await supabase.auth.getSession();
+              const authHeaders = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${session?.access_token || ''}`
+              };
+              const payload = {
+                action: 'bulk_link_by_sku',
+                provider: selectedProvider,
+                account_id: selectedAccountId,
+                items: unmapped.slice(0, 200).map(u => ({ remote_sku: u.remote_sku, remote_id: u.remote_id }))
+              };
+              const bulkResp = await fetch('/.netlify/functions/marketplaces-mapping', {
+                method: 'POST',
+                headers: authHeaders,
+                body: JSON.stringify(payload)
+              });
+              const bulkJson = await bulkResp.json().catch(() => ({} as any));
+              if (bulkResp.ok) {
+                setNeedsReview(Array.isArray(bulkJson?.needs_review) ? bulkJson.needs_review : []);
+                if ((bulkJson?.linked || 0) > 0) {
+                  // Trigger a refetch to populate qty_app for newly linked SKUs
+                  setReloadToken(x => x + 1);
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('auto_link_by_sku failed', (e as any)?.message || e);
+          }
+        }
       } catch (err: any) {
         console.error('🔥 Error fetching listings:', err);
         setError(err.message);
@@ -240,7 +286,7 @@ export default function MarketplacePricing() {
     };
 
     fetchListings();
-  }, [selectedAccountId, filters, currentPage, selectedProvider]);
+  }, [selectedAccountId, filters, currentPage, selectedProvider, reloadToken]);
 
   // Filtrage et tri local
   useEffect(() => {
@@ -271,6 +317,20 @@ export default function MarketplacePricing() {
 
     setFilteredListings(result);
   }, [listings, filters]);
+
+  // Prompt to sync quantities when listings updated and mappings exist
+  useEffect(() => {
+    if (!autoLinkAttempted) return;
+    const mismatches = listings.filter(
+      l => l.is_mapped && l.qty_app != null && l.remote_sku && l.qty_ebay !== l.qty_app
+    );
+    if (mismatches.length > 0) {
+      setItemsToSync(
+        mismatches.map(l => ({ sku: l.remote_sku, quantity: l.qty_app as number }))
+      );
+      setShowQtySyncPrompt(true);
+    }
+  }, [listings, autoLinkAttempted]);
 
   // Toast auto-hide
   useEffect(() => {
@@ -333,6 +393,7 @@ export default function MarketplacePricing() {
         setListings(updatedListings);
         setToast({ message: 'Produit lié automatiquement (SKU)', type: 'success' });
         setShowLinkModal(false);
+        setReloadToken(x => x + 1);
         return;
       }
 
@@ -383,6 +444,7 @@ export default function MarketplacePricing() {
 
       setToast({ message: 'Produit lié avec succès', type: 'success' });
       setShowLinkModal(false);
+      setReloadToken(x => x + 1);
     } catch (err: any) {
       setToast({ message: `Erreur: ${err.message}`, type: 'error' });
     } finally {
@@ -475,6 +537,30 @@ export default function MarketplacePricing() {
       setToast({ message: `Erreur MAJ quantité: ${err.message}`, type: 'error' });
     } finally {
       setActionLoading({ ...actionLoading, [listing.remote_id]: false });
+    }
+  };
+
+  const confirmBulkQtySync = async () => {
+    try {
+      const resp = await fetch('/.netlify/functions/marketplaces-stock-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          account_id: selectedAccountId,
+          items: itemsToSync
+        })
+      });
+      const js = await resp.json().catch(() => ({} as any));
+      if (!resp.ok) throw new Error(js?.error || `HTTP ${resp.status}`);
+      const skuSet = new Set(itemsToSync.map(i => i.sku));
+      setListings(prev =>
+        prev.map(l => (skuSet.has(l.remote_sku) ? { ...l, qty_ebay: l.qty_app ?? l.qty_ebay } : l))
+      );
+      setToast({ message: `Quantités mises à jour sur eBay (${itemsToSync.length})`, type: 'success' });
+    } catch (e: any) {
+      setToast({ message: `Erreur MAJ quantités: ${e.message}`, type: 'error' });
+    } finally {
+      setShowQtySyncPrompt(false);
     }
   };
 
@@ -829,10 +915,36 @@ export default function MarketplacePricing() {
               </button>
               <button
                 onClick={confirmLink}
-                disabled={!productIdInput.trim()}
+                disabled={actionLoading[linkModalData.remoteId]}
                 className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Confirmer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Sync quantités */}
+      {showQtySyncPrompt && itemsToSync.length > 0 && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md shadow-xl">
+            <h2 className="text-lg font-semibold mb-3">Mettre à jour les quantités sur eBay</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              {itemsToSync.length} produit(s) ont une différence entre Qté app et Qté eBay. Voulez-vous pousser les quantités de l'app vers eBay maintenant ?
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowQtySyncPrompt(false)}
+                className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
+              >
+                Plus tard
+              </button>
+              <button
+                onClick={confirmBulkQtySync}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700"
+              >
+                Mettre à jour maintenant
               </button>
             </div>
           </div>
