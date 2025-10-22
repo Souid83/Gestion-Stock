@@ -1,4 +1,4 @@
-import { Database } from './supabase';
+import type { Database } from './supabase-generated';
 
 // Customer types
 export type Customer = Database['public']['Tables']['customers']['Row'];
