@@ -79,7 +79,11 @@ export const handler = async (event: any) => {
     const qs = event.queryStringParameters || {};
     const account_id = qs.account_id;
     const limit = Math.min(parseInt(qs.limit || '50', 10) || 50, 200);
-    const offset = parseInt(qs.offset || '0', 10) || 0;
+    const page = Math.max(parseInt(qs.page || '1', 10) || 1, 1);
+    let offset = parseInt(qs.offset || '0', 10) || 0;
+    if (!qs.offset && qs.page) {
+      offset = (page - 1) * limit;
+    }
     const maxOffersPerSku = parseInt(qs.max_offers_per_sku || '5', 10) || 5;
 
     if (!account_id) return badRequest('missing_account_id');
@@ -170,9 +174,24 @@ export const handler = async (event: any) => {
 
         const items = Array.isArray(json.inventoryItems) ? json.inventoryItems : [];
         const skus = items.map((it: any) => it && (it.sku || it.SKU || it.Sku)).filter(Boolean);
+
+        // Build qty map per SKU
+        const qtyBySku: Record<string, number> = {};
+        for (const it of items) {
+          const sku = it && (it.sku || it.SKU || it.Sku);
+          if (!sku) continue;
+          const qty =
+            (it?.availability?.shipToLocationAvailability?.quantity ?? null) ??
+            (Array.isArray(it?.availability?.pickupAtLocationAvailability)
+              ? it.availability.pickupAtLocationAvailability.reduce((sum: number, loc: any) => sum + (loc?.quantity || 0), 0)
+              : null) ??
+            (it?.availability?.availableQuantity ?? null) ??
+            (it?.availableQuantity ?? null);
+          if (typeof qty === 'number') qtyBySku[sku] = qty;
+        }
         console.info('📦 Inventory SKUs found:', skus.length);
 
-        return { ok: true, skus, total: json.total || skus.length };
+        return { ok: true, skus, total: json.total || skus.length, qtyBySku };
       });
     };
 
@@ -330,6 +349,37 @@ export const handler = async (event: any) => {
     skus = skus.slice(0, MAX_SKUS_PER_RUN);
     console.info('🔎 Processing', skus.length, 'SKUs (max', MAX_SKUS_PER_RUN, ')');
 
+    // Quantities maps
+    const qtyEbayBySku: Record<string, number> = (inv && (inv as any).qtyBySku) || {};
+    let qtyAppBySku: Record<string, number | null> = {};
+    try {
+      // Get mappings
+      const { data: mappings } = await supabaseService
+        .from('marketplace_products_map')
+        .select('remote_sku, product_id')
+        .eq('provider', 'ebay')
+        .eq('marketplace_account_id', account_id)
+        .in('remote_sku', skus);
+
+      const productIds = Array.isArray(mappings) ? mappings.map((m: any) => m.product_id).filter(Boolean) : [];
+      if (productIds.length > 0) {
+        const { data: stocks } = await supabaseService
+          .from('products_with_stock')
+          .select('id, shared_quantity')
+          .in('id', productIds);
+        const qtyByProductId: Record<string, number | null> = {};
+        (stocks || []).forEach((s: any) => {
+          qtyByProductId[s.id] = typeof s.shared_quantity === 'number' ? s.shared_quantity : (s.shared_quantity ?? null);
+        });
+        (mappings || []).forEach((m: any) => {
+          if (m?.remote_sku && m?.product_id) qtyAppBySku[m.remote_sku] = (qtyByProductId[m.product_id] ?? null);
+        });
+      }
+      console.info('🧮 Qty maps built — ebay:', Object.keys(qtyEbayBySku).length, 'app:', Object.keys(qtyAppBySku).length);
+    } catch (e) {
+      console.warn('⚠️ qty mapping failed', (e as any)?.message || e);
+    }
+
     const allOffers = [];
     let skippedCount = 0;
     let totalRetries = 0;
@@ -359,6 +409,13 @@ export const handler = async (event: any) => {
 
     console.info('🧾 Offers collected:', allOffers.length, 'Skipped SKUs:', skippedCount);
 
+    const sampleOffers = allOffers.slice(0, 3).map((o: any) => ({
+      sku: o?.sku || null,
+      price: o?.pricingSummary?.price?.value || null,
+      currency: o?.pricingSummary?.price?.currency || null
+    }));
+    console.info('🔎 Sample offers (sku/price):', sampleOffers);
+
     const defaultCurrency = account.currency || 'EUR';
     const items = allOffers.map((offer) => ({
       provider: 'ebay',
@@ -373,7 +430,14 @@ export const handler = async (event: any) => {
         ? offer.pricingSummary.price.currency
         : defaultCurrency,
       status_sync: normalizeListingStatus(offer && offer.listingStatus ? offer.listingStatus : undefined),
-      metadata: { listingStatus: (offer && offer.listingStatus ? offer.listingStatus : null) },
+      metadata: {
+        listingStatus: (offer && offer.listingStatus ? offer.listingStatus : null),
+        marketplaceId: (offer && offer.marketplaceId ? offer.marketplaceId : null),
+        availableQuantity: (offer && typeof offer.availableQuantity !== 'undefined' ? offer.availableQuantity : null),
+        format: (offer && (offer.format || offer.offerType) ? (offer.format || offer.offerType) : null)
+      },
+      qty_ebay: offer && offer.sku ? (qtyEbayBySku[offer.sku] ?? null) : null,
+      qty_app: offer && offer.sku ? (qtyAppBySku[offer.sku] ?? null) : null,
       updated_at: new Date().toISOString()
     })).filter((it) => it.remote_id);
 
@@ -401,7 +465,8 @@ export const handler = async (event: any) => {
         offset,
         processed_skus: skus.length,
         skipped_skus: skippedCount,
-        retries: totalRetries
+        retries: totalRetries,
+        total: (inv && (inv as any).total) || skus.length
       })
     };
   } catch (err: any) {
