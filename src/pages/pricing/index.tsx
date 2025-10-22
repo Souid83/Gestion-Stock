@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from "react-router-dom";
 import { Package, RefreshCw, Search } from 'lucide-react';
-import { isAdmin } from '../../lib/supabase';
+import { isAdmin, supabase } from '../../lib/supabase';
 
 // Types inline
 interface MarketplaceAccount {
@@ -304,9 +304,14 @@ export default function MarketplacePricing() {
     setActionLoading({ ...actionLoading, [linkModalData.remoteId]: true });
     try {
       // 1) tentative auto: link_by_sku (SKU exact)
+      const { data: { session } } = await supabase.auth.getSession();
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session?.access_token || ''}`
+      };
       const autoResp = await fetch('/.netlify/functions/marketplaces-mapping', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           action: 'link_by_sku',
           provider: selectedProvider,
@@ -353,7 +358,7 @@ export default function MarketplacePricing() {
 
       const response = await fetch('/.netlify/functions/marketplaces-mapping', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           action: 'link',
           provider: selectedProvider,
@@ -388,9 +393,14 @@ export default function MarketplacePricing() {
   const handleCreate = async (remoteId: string) => {
     setActionLoading({ ...actionLoading, [remoteId]: true });
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session?.access_token || ''}`
+      };
       const response = await fetch('/.netlify/functions/marketplaces-mapping', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           action: 'create',
           provider: selectedProvider,
@@ -416,9 +426,14 @@ export default function MarketplacePricing() {
   const handleIgnore = async (remoteId: string) => {
     setActionLoading({ ...actionLoading, [remoteId]: true });
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session?.access_token || ''}`
+      };
       const response = await fetch('/.netlify/functions/marketplaces-mapping', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           action: 'ignore',
           provider: selectedProvider,
