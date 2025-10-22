@@ -24,6 +24,23 @@ interface NetlifyResponse {
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
 
+// -------- SKU helpers (normalization + patterns) --------
+const normalizeSku = (s: string) => (s || '').trim();
+const upper = (s: string) => s.toUpperCase();
+const stripSep = (s: string) => s.replace(/[\s\-_]+/g, '');
+const ltrimZeros = (s: string) => s.replace(/^0+/, '');
+const buildSkuMatchers = (raw: string) => {
+  const base = normalizeSku(raw);
+  const u = upper(base);
+  // Exact candidates (DB stores exact SKU in many cases)
+  const exactSet = Array.from(new Set([base, u, ltrimZeros(u)]));
+  // Pattern tolerant to separators: AA-BC 123 -> %AA%BC%123%
+  const ilikePattern = `%${u.replace(/[\s\-_]+/g, '%')}%`;
+  // Pattern without separators: AABC123 -> %AABC123%
+  const ilikeNoSep = `%${stripSep(u)}%`;
+  return { exactSet, ilikePattern, ilikeNoSep };
+};
+
 interface RequestBody {
   action: 'link' | 'create' | 'ignore' | 'link_by_sku' | 'bulk_link_by_sku';
   provider: string;
@@ -203,19 +220,40 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         .eq('remote_sku', remote_sku)
         .maybeSingle();
 
-      // Try to find a unique product by exact SKU (case-insensitive)
-      let { data: products, error: prodErr } = await supabase
-        .from('products')
-        .select('id, sku, name')
-        .eq('sku', remote_sku);
+      // Try robust SKU matching
+      const matchers = buildSkuMatchers(remote_sku || '');
+      let products: any[] = [];
+      let prodErr: any = null;
 
-      // If none found, try ilike exact-equivalent and then partial candidates
-      if ((!products || products.length === 0)) {
-        const { data: exactIlike } = await supabase
+      // 1) exact candidates
+      try {
+        const { data: pExact } = await supabase
           .from('products')
-          .select('id, sku, name')
-          .ilike('sku', remote_sku);
-        products = exactIlike || [];
+          .select('id, sku, name, parent_id')
+          .in('sku', matchers.exactSet);
+        products = pExact || [];
+      } catch (e) {
+        prodErr = e;
+      }
+
+      // 2) tolerant ilike if nothing found
+      if (!products || products.length === 0) {
+        const { data: pLike } = await supabase
+          .from('products')
+          .select('id, sku, name, parent_id')
+          .ilike('sku', matchers.ilikePattern)
+          .limit(25);
+        products = pLike || [];
+      }
+
+      // 3) fallback: no-sep pattern
+      if (!products || products.length === 0) {
+        const { data: pNoSep } = await supabase
+          .from('products')
+          .select('id, sku, name, parent_id')
+          .ilike('sku', matchers.ilikeNoSep)
+          .limit(25);
+        products = pNoSep || [];
       }
 
       if (prodErr) {
@@ -223,39 +261,27 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       }
 
       if (!products || products.length === 0) {
-        // As a last resort, propose candidates (partial match)
-        const { data: candidates } = await supabase
-          .from('products')
-          .select('id, sku, name')
-          .ilike('sku', `%${remote_sku}%`)
-          .limit(10);
-
-        if (candidates && candidates.length > 0) {
-          return {
-            statusCode: 200,
-            body: JSON.stringify({
-              status: 'multiple_matches',
-              remote_sku,
-              candidates
-            })
-          };
-        }
-
         return {
           statusCode: 200,
           body: JSON.stringify({ status: 'not_found', remote_sku })
         };
       }
 
+      // Prefer parent products if multiple
       if (products.length > 1) {
-        return {
-          statusCode: 200,
-          body: JSON.stringify({
-            status: 'multiple_matches',
-            remote_sku,
-            candidates: products.slice(0, 10)
-          })
-        };
+        const parents = products.filter((p: any) => !p.parent_id);
+        if (parents.length === 1) {
+          products = parents;
+        } else {
+          return {
+            statusCode: 200,
+            body: JSON.stringify({
+              status: 'multiple_matches',
+              remote_sku,
+              candidates: (parents.length > 0 ? parents : products).slice(0, 10)
+            })
+          };
+        }
       }
 
       const productId = products[0].id;
@@ -322,18 +348,34 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
           continue;
         }
 
-        // Find products by SKU (exact first, then case-insensitive)
-        let { data: prods } = await supabase
+        // Robust matching per item
+        const m = buildSkuMatchers(sku);
+        let prods: any[] = [];
+
+        // exact
+        const { data: pExact } = await supabase
           .from('products')
-          .select('id, sku, name')
-          .eq('sku', sku);
+          .select('id, sku, name, parent_id')
+          .in('sku', m.exactSet);
+        prods = pExact || [];
+
+        // ilike tolerant
+        if (!prods || prods.length === 0) {
+          const { data: pLike } = await supabase
+            .from('products')
+            .select('id, sku, name, parent_id')
+            .ilike('sku', m.ilikePattern)
+            .limit(25);
+          prods = pLike || [];
+        }
 
         if (!prods || prods.length === 0) {
-          const { data: exactIlike } = await supabase
+          const { data: pNoSep } = await supabase
             .from('products')
-            .select('id, sku, name')
-            .ilike('sku', sku);
-          prods = exactIlike || [];
+            .select('id, sku, name, parent_id')
+            .ilike('sku', m.ilikeNoSep)
+            .limit(25);
+          prods = pNoSep || [];
         }
 
         if (!prods || prods.length === 0) {
@@ -341,12 +383,17 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
           continue;
         }
         if (prods.length > 1) {
-          results.push({
-            remote_sku: sku,
-            status: 'multiple_matches',
-            candidates: prods.slice(0, 10)
-          });
-          continue;
+          const parents = prods.filter((p: any) => !p.parent_id);
+          if (parents.length === 1) {
+            prods = parents;
+          } else {
+            results.push({
+              remote_sku: sku,
+              status: 'multiple_matches',
+              candidates: (parents.length > 0 ? parents : prods).slice(0, 10)
+            });
+            continue;
+          }
         }
 
         const productId = prods[0].id;
