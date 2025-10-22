@@ -84,6 +84,7 @@ export default function MarketplacePricing() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [totalCount, setTotalCount] = useState(0);
   const [needsReview, setNeedsReview] = useState<any[]>([]);
+  const [showReviewPanel, setShowReviewPanel] = useState(false);
   const [showQtySyncPrompt, setShowQtySyncPrompt] = useState(false);
   const [itemsToSync, setItemsToSync] = useState<{ sku: string; quantity: number }[]>([]);
   const [autoLinkAttempted, setAutoLinkAttempted] = useState(false);
@@ -265,8 +266,12 @@ export default function MarketplacePricing() {
               });
               const bulkJson = await bulkResp.json().catch(() => ({} as any));
               if (bulkResp.ok) {
-                setNeedsReview(Array.isArray(bulkJson?.needs_review) ? bulkJson.needs_review : []);
-                if ((bulkJson?.linked || 0) > 0) {
+                const linked = Number(bulkJson?.linked || 0);
+                const review = Array.isArray(bulkJson?.needs_review) ? bulkJson.needs_review : [];
+                setNeedsReview(review);
+                setShowReviewPanel(review.length > 0);
+                setToast({ message: `Auto-liaison: ${linked} lié(s), ${review.length} à revoir`, type: linked > 0 ? 'success' : 'error' });
+                if (linked > 0) {
                   // Trigger a refetch to populate qty_app for newly linked SKUs
                   setReloadToken(x => x + 1);
                 }
@@ -564,6 +569,16 @@ export default function MarketplacePricing() {
     }
   };
 
+  const handleResolveBySku = (sku: string) => {
+    // Ouvre la modale de lien sur la première ligne correspondante
+    const row = listings.find(l => l.remote_sku === sku && !l.is_mapped);
+    if (!row) {
+      setToast({ message: `Aucune ligne non mappée pour SKU ${sku}`, type: 'error' });
+      return;
+    }
+    handleLinkClick(row.remote_id, row.remote_sku);
+  };
+
   // Guard render
   if (hasAccess === null) {
     return (
@@ -677,6 +692,53 @@ export default function MarketplacePricing() {
             <option value="pending">En attente</option>
             <option value="failed">Erreur</option>
           </select>
+        </div>
+      )}
+
+      {/* Résumé auto-liaison / À revoir */}
+      {selectedAccountId && showReviewPanel && needsReview.length > 0 && (
+        <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="font-semibold text-yellow-900">À revoir ({needsReview.length})</h3>
+            <button
+              onClick={() => setShowReviewPanel(false)}
+              className="text-sm text-yellow-800 hover:underline"
+            >
+              Masquer
+            </button>
+          </div>
+          <div className="max-h-40 overflow-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="text-yellow-900">
+                  <th className="text-left px-2 py-1">SKU</th>
+                  <th className="text-left px-2 py-1">Raison</th>
+                  <th className="text-left px-2 py-1">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {needsReview.map((it, idx) => (
+                  <tr key={`${it?.remote_sku || 's'}-${idx}`} className="border-t border-yellow-200">
+                    <td className="px-2 py-1 font-mono">{it?.remote_sku || '—'}</td>
+                    <td className="px-2 py-1">
+                      {it?.status === 'multiple_matches' ? 'Plusieurs correspondances' :
+                       it?.status === 'not_found' ? 'Introuvable' :
+                       it?.status === 'conflict' ? 'Conflit de mapping' :
+                       it?.status || '—'}
+                    </td>
+                    <td className="px-2 py-1">
+                      <button
+                        onClick={() => handleResolveBySku(it?.remote_sku)}
+                        className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
+                      >
+                        Lier…
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
