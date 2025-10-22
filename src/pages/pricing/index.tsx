@@ -299,10 +299,58 @@ export default function MarketplacePricing() {
   };
 
   const confirmLink = async () => {
-    if (!linkModalData || !productIdInput.trim()) return;
+    if (!linkModalData) return;
 
     setActionLoading({ ...actionLoading, [linkModalData.remoteId]: true });
     try {
+      // 1) tentative auto: link_by_sku (SKU exact)
+      const autoResp = await fetch('/.netlify/functions/marketplaces-mapping', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'link_by_sku',
+          provider: selectedProvider,
+          account_id: selectedAccountId,
+          remote_id: linkModalData.remoteId,
+          remote_sku: linkModalData.remoteSku
+        })
+      });
+
+      const autoJson = await autoResp.json().catch(() => ({} as any));
+
+      if (autoResp.ok && autoJson?.status === 'ok') {
+        // Lié automatiquement
+        const updatedListings = listings.map(l =>
+          l.remote_id === linkModalData.remoteId
+            ? { ...l, is_mapped: true, product_id: autoJson?.mapping?.product_id || null, sync_status: 'ok' as const }
+            : l
+        );
+        setListings(updatedListings);
+        setToast({ message: 'Produit lié automatiquement (SKU)', type: 'success' });
+        setShowLinkModal(false);
+        return;
+      }
+
+      if (autoResp.ok && autoJson?.status === 'multiple_matches') {
+        // Afficher les candidats dans la modale actuelle via input libre → on bascule en mode "sélection"
+        setToast({ message: 'Plusieurs correspondances trouvées pour ce SKU. Saisissez l’ID produit voulu puis confirmez.', type: 'error' });
+        // Laisser la modale ouverte avec input productIdInput pour sélection manuelle
+        return;
+      }
+
+      if (autoResp.ok && autoJson?.status === 'not_found') {
+        // Aucun match → fallback sur saisie manuelle (champ déjà présent)
+        if (!productIdInput.trim()) {
+          setToast({ message: 'Aucun produit interne trouvé pour ce SKU. Saisissez un ID produit.', type: 'error' });
+          return;
+        }
+      }
+
+      // 2) fallback: lien explicite avec product_id saisi
+      if (!productIdInput.trim()) {
+        throw new Error(autoJson?.error || 'Aucun produit trouvé. Saisissez un ID interne pour lier.');
+      }
+
       const response = await fetch('/.netlify/functions/marketplaces-mapping', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -316,7 +364,10 @@ export default function MarketplacePricing() {
         })
       });
 
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const errJ = await response.json().catch(() => ({}));
+        throw new Error(errJ?.error || `HTTP ${response.status}`);
+      }
 
       const updatedListings = listings.map(l =>
         l.remote_id === linkModalData.remoteId
