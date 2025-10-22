@@ -334,131 +334,153 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     }
 
     if (action === 'bulk_link_by_sku') {
-      const items = Array.isArray(body.items) ? body.items : [];
+      const inputItems = Array.isArray(body.items) ? body.items : [];
       const dry_run = Boolean(body.dry_run);
-      if (items.length === 0) {
+      if (inputItems.length === 0) {
         return { statusCode: 400, body: JSON.stringify({ error: 'bad_request', hint: 'items[] required' }) };
       }
 
+      console.time('bulk_link_by_sku');
+
+      // 1) Normalisation + cap batch size to prevent timeouts
+      const MAX_BATCH = 100;
+      const items = inputItems.slice(0, MAX_BATCH);
+      const skus = Array.from(
+        new Set(
+          items
+            .map((it: any) => (it?.remote_sku || '').trim())
+            .filter((s: string) => s.length > 0)
+        )
+      );
+
+      if (skus.length === 0) {
+        return { statusCode: 400, body: JSON.stringify({ error: 'bad_request', hint: 'no_valid_skus' }) };
+      }
+
+      // 2) Single query: products exact-only
+      const { data: prodRows, error: prodErr } = await supabase
+        .from('products')
+        .select('id, sku, parent_id')
+        .in('sku', skus);
+
+      if (prodErr) {
+        console.error('bulk_link_by_sku products error', prodErr);
+        return { statusCode: 500, body: JSON.stringify({ error: 'server_error' }) };
+      }
+
+      // Prefer parent when duplicates by the same SKU
+      const productBySku: Record<string, any> = {};
+      (prodRows || []).forEach((p: any) => {
+        const key = (p?.sku || '').trim();
+        if (!key) return;
+        if (!productBySku[key]) {
+          productBySku[key] = p;
+        } else {
+          const current = productBySku[key];
+          // If current is a child and new is a parent, prefer parent
+          if (current?.parent_id && !p?.parent_id) {
+            productBySku[key] = p;
+          }
+        }
+      });
+
+      // 3) Single query: existing mappings for these SKUs
+      const { data: existingMaps, error: mapErr } = await supabase
+        .from('marketplace_products_map')
+        .select('remote_sku, product_id')
+        .eq('provider', provider)
+        .eq('marketplace_account_id', account_id)
+        .in('remote_sku', skus);
+
+      if (mapErr) {
+        console.error('bulk_link_by_sku maps error', mapErr);
+        return { statusCode: 500, body: JSON.stringify({ error: 'server_error' }) };
+      }
+
+      const mapBySku: Record<string, string> = {};
+      (existingMaps || []).forEach((m: any) => {
+        if (m?.remote_sku) mapBySku[m.remote_sku] = m.product_id;
+      });
+
+      // 4) Single query: listings for remote_id enrichment
+      const { data: listingRows } = await supabase
+        .from('marketplace_listings')
+        .select('remote_sku, remote_id')
+        .eq('provider', provider)
+        .eq('marketplace_account_id', account_id)
+        .in('remote_sku', skus);
+
+      const remoteIdBySku: Record<string, string | null> = {};
+      (listingRows || []).forEach((l: any) => {
+        if (l?.remote_sku) remoteIdBySku[l.remote_sku] = l.remote_id || null;
+      });
+
+      // 5) Build inserts in batch
+      const inserts: any[] = [];
       const results: any[] = [];
-      for (const it of items) {
-        const sku = (it?.remote_sku || '').trim();
-        if (!sku) {
-          results.push({ remote_sku: null, status: 'bad_item' });
+
+      for (const sku of skus) {
+        const prod = productBySku[sku];
+        const existingPid = mapBySku[sku];
+
+        if (existingPid) {
+          // Already mapped
+          results.push({
+            remote_sku: sku,
+            status: 'ok',
+            product_id: existingPid
+          });
           continue;
         }
 
-        // Robust matching per item
-        const m = buildSkuMatchers(sku);
-        let prods: any[] = [];
-
-        // exact
-        const { data: pExact } = await supabase
-          .from('products')
-          .select('id, sku, name, parent_id')
-          .in('sku', m.exactSet);
-        prods = pExact || [];
-
-        // ilike tolerant
-        if (!prods || prods.length === 0) {
-          const { data: pLike } = await supabase
-            .from('products')
-            .select('id, sku, name, parent_id')
-            .ilike('sku', m.ilikePattern)
-            .limit(25);
-          prods = pLike || [];
-        }
-
-        if (!prods || prods.length === 0) {
-          const { data: pNoSep } = await supabase
-            .from('products')
-            .select('id, sku, name, parent_id')
-            .ilike('sku', m.ilikeNoSep)
-            .limit(25);
-          prods = pNoSep || [];
-        }
-
-        if (!prods || prods.length === 0) {
+        if (!prod) {
+          // No exact match — leave to review (no ILIKE in bulk for performance)
           results.push({ remote_sku: sku, status: 'not_found' });
           continue;
         }
-        if (prods.length > 1) {
-          const parents = prods.filter((p: any) => !p.parent_id);
-          if (parents.length === 1) {
-            prods = parents;
-          } else {
-            results.push({
-              remote_sku: sku,
-              status: 'multiple_matches',
-              candidates: (parents.length > 0 ? parents : prods).slice(0, 10)
-            });
-            continue;
-          }
-        }
-
-        const productId = prods[0].id;
 
         if (dry_run) {
-          results.push({ remote_sku: sku, status: 'would_link', product_id: productId });
+          results.push({ remote_sku: sku, status: 'would_link', product_id: prod.id });
           continue;
         }
 
-        // Check existing mapping
-        const { data: existingMapping } = await supabase
-          .from('marketplace_products_map')
-          .select('product_id')
-          .eq('provider', provider)
-          .eq('marketplace_account_id', account_id)
-          .eq('remote_sku', sku)
-          .maybeSingle();
+        inserts.push({
+          provider,
+          marketplace_account_id: account_id,
+          remote_sku: sku,
+          remote_id: remoteIdBySku[sku] ?? null,
+          product_id: prod.id,
+          mapping_status: 'linked',
+          updated_at: new Date().toISOString()
+        });
+      }
 
-        if (existingMapping) {
-          if (existingMapping.product_id === productId) {
-            results.push({ remote_sku: sku, status: 'ok', product_id: productId });
-          } else {
-            results.push({ remote_sku: sku, status: 'conflict' });
-          }
-          continue;
-        }
-
-        // Fetch listing remote_id for completeness
-        const { data: listingCandidate } = await supabase
-          .from('marketplace_listings')
-          .select('remote_id')
-          .eq('provider', provider)
-          .eq('marketplace_account_id', account_id)
-          .eq('remote_sku', sku)
-          .maybeSingle();
-
+      // 6) Execute a single upsert for new mappings
+      if (inserts.length > 0 && !dry_run) {
         const { error: insErr } = await supabase
           .from('marketplace_products_map')
-          .insert({
-            provider,
-            marketplace_account_id: account_id,
-            remote_sku: sku,
-            remote_id: listingCandidate?.remote_id || null,
-            product_id: productId,
-            mapping_status: 'linked',
-            updated_at: new Date().toISOString()
-          });
-
+          .upsert(inserts, { onConflict: 'provider,marketplace_account_id,remote_sku' });
         if (insErr) {
-          results.push({ remote_sku: sku, status: 'error', message: 'insert_failed' });
-        } else {
-          results.push({ remote_sku: sku, status: 'ok', product_id: productId });
+          console.error('bulk_link_by_sku upsert error', insErr);
+          // Mark any inserted SKUs as error (best effort)
+          inserts.forEach((i: any) => {
+            const idx = results.findIndex(r => r.remote_sku === i.remote_sku);
+            if (idx >= 0) results[idx] = { remote_sku: i.remote_sku, status: 'error', message: 'insert_failed' };
+          });
         }
       }
 
-      const linked = results.filter(r => r.status === 'ok').length;
-      const needsReview = results.filter(r => r.status === 'multiple_matches' || r.status === 'not_found' || r.status === 'conflict');
+      const linked = results.filter(r => r.status === 'ok' || r.status === 'would_link').length;
+      const needsReview = results.filter(r => r.status === 'not_found' || r.status === 'multiple_matches' || r.status === 'conflict');
 
+      console.timeEnd('bulk_link_by_sku');
       return {
         statusCode: 200,
         body: JSON.stringify({
           linked,
           total: items.length,
           needs_review: needsReview,
-          results: results.slice(0, 50) // limit response size
+          results: results.slice(0, 200)
         })
       };
     }
