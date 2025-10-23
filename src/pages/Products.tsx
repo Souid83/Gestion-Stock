@@ -58,6 +58,9 @@ export const Products: React.FC = () => {
   const [pageSize, setPageSize] = useState(50);
   const [isExportingAll, setIsExportingAll] = useState(false);
 
+  // Persistance de l'état (filtres/pagination/recherche)
+  const STORAGE_KEY = 'products:list:state:v1';
+
   // États des filtres
   const [filterType, setFilterType] = useState<string>('');
   const [filterBrand, setFilterBrand] = useState<string>('');
@@ -161,16 +164,42 @@ export const Products: React.FC = () => {
         console.warn('Unable to load stock names for PAM filter:', e);
       }
 
-      // Check for search query and trigger search if needed
-      const savedQuery = sessionStorage.getItem('productSearchQuery');
-      const shouldTriggerSearch = sessionStorage.getItem('shouldTriggerSearch');
+      // Restaurer filtres/pagination/recherche depuis sessionStorage
+      try {
+        const raw = sessionStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          const st = JSON.parse(raw) || {};
+          // UI state
+          if (typeof st.isFiltersExpanded === 'boolean') setIsFiltersExpanded(!!st.isFiltersExpanded);
+          if (typeof st.page === 'number' && st.page > 0) setPage(st.page);
+          if (typeof st.pageSize === 'number' && st.pageSize > 0) setPageSize(st.pageSize);
+          if (typeof st.search === 'string') setCurrentSearchQuery(st.search);
 
-      if (savedQuery && shouldTriggerSearch === 'true') {
-        handleSearch(savedQuery);
-        setCurrentSearchQuery(savedQuery);
-        sessionStorage.removeItem('shouldTriggerSearch');
-      } else {
-        // Load initial 50 products
+          const f = st.filters || {};
+          setFilterType(f.type ?? '');
+          setFilterBrand(f.brand ?? '');
+          setFilterModel(f.model ?? '');
+          setFilterStatus(Array.isArray(f.status) ? f.status : []);
+          setFilterProductType(Array.isArray(f.productType) ? f.productType : []);
+          setFilterStock(f.stock ?? '');
+          setFilterPurchasePriceMin(f.purchasePriceMin ?? '');
+          setFilterPurchasePriceMax(f.purchasePriceMax ?? '');
+          setFilterSalePriceMin(f.salePriceMin ?? '');
+          setFilterSalePriceMax(f.salePriceMax ?? '');
+          setFilterMarginPercentMin(f.marginPercentMin ?? '');
+          setFilterMarginPercentMax(f.marginPercentMax ?? '');
+          setFilterMarginEuroMin(f.marginEuroMin ?? '');
+          setFilterMarginEuroMax(f.marginEuroMax ?? '');
+          setFilterVAT(f.vat ?? '');
+          setFilterSupplier(f.supplier ?? '');
+          setFilterLocation(f.location ?? '');
+          setFilterPAMStockLocation(f.pamStockLocation ?? '');
+          // Ne pas appeler applyFilters ici: le useEffect de dépendances déclenchera une recherche avec l'état restauré
+        } else {
+          // Pas d'état sauvegardé: chargement initial
+          applyFilters('');
+        }
+      } catch {
         applyFilters('');
       }
     };
@@ -1043,6 +1072,7 @@ export const Products: React.FC = () => {
   const handleSearch = async (query: string) => {
     console.log('handleSearch called with query:', query);
     setCurrentSearchQuery(query);
+    // Ne pas réinitialiser page ici: conserver la pagination courante
     applyFilters(query);
   };
 
@@ -1065,7 +1095,57 @@ export const Products: React.FC = () => {
     setFilterVAT('');
     setFilterSupplier('');
     setFilterLocation('');
+    setFilterPAMStockLocation('');
+    // Revenir à la page 1 pour éviter les pages vides après reset
+    setPage(1);
   };
+
+  // Sauvegarde persistante de l'état (filtres/pagination/recherche)
+  useEffect(() => {
+    try {
+      const payload = {
+        search: currentSearchQuery,
+        page,
+        pageSize,
+        isFiltersExpanded,
+        filters: {
+          type: filterType,
+          brand: filterBrand,
+          model: filterModel,
+          status: filterStatus,
+          productType: filterProductType,
+          stock: filterStock,
+          purchasePriceMin: filterPurchasePriceMin,
+          purchasePriceMax: filterPurchasePriceMax,
+          salePriceMin: filterSalePriceMin,
+          salePriceMax: filterSalePriceMax,
+          marginPercentMin: filterMarginPercentMin,
+          marginPercentMax: filterMarginPercentMax,
+          marginEuroMin: filterMarginEuroMin,
+          marginEuroMax: filterMarginEuroMax,
+          vat: filterVAT,
+          supplier: filterSupplier,
+          location: filterLocation,
+          pamStockLocation: filterPAMStockLocation
+        }
+      };
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // ignore
+    }
+  }, [
+    currentSearchQuery,
+    page, pageSize, isFiltersExpanded,
+    filterType, filterBrand, filterModel,
+    filterStatus, filterProductType,
+    filterStock,
+    filterPurchasePriceMin, filterPurchasePriceMax,
+    filterSalePriceMin, filterSalePriceMax,
+    filterMarginPercentMin, filterMarginPercentMax,
+    filterMarginEuroMin, filterMarginEuroMax,
+    filterVAT, filterSupplier, filterLocation,
+    filterPAMStockLocation
+  ]);
 
   const countActiveFilters = (): number => {
     let count = 0;
