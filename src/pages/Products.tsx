@@ -195,6 +195,16 @@ export const Products: React.FC = () => {
           )
         `);
 
+      // Accumulateur d'IDs (composition AND de filtres spéciaux)
+      let idConstraint: Set<string> | null = null;
+      const intersectIds = (a: Set<string> | null, b: string[]) => {
+        const s = new Set(b.filter(Boolean));
+        if (!a) return s;
+        const out: string[] = [];
+        a.forEach(x => { if (s.has(x)) out.push(x); });
+        return new Set(out);
+      };
+
       // Filtre de recherche textuelle
       {
         const normalized = normalizeQuery(query || '');
@@ -435,13 +445,122 @@ export const Products: React.FC = () => {
         }
       }
 
+      // Pré-calcul des contraintes par ID (composition AND)
+      // 1) Parent miroir → réduire le domaine aux parents qui ont au moins un enfant (non sérialisé)
+      if (filterProductType.includes('mirror_parent')) {
+        try {
+          const { data: mirrorRows } = await supabase
+            .from('products')
+            .select('parent_id')
+            .is('serial_number', null)
+            .not('parent_id', 'is', null);
+          const mirrorParentIds = Array.from(
+            new Set(((mirrorRows as any[]) || []).map((r: any) => r?.parent_id).filter(Boolean))
+          );
+          if (mirrorParentIds.length >= 0) {
+            idConstraint = intersectIds(idConstraint, mirrorParentIds);
+          }
+        } catch (e) {
+          console.warn('mirror_parent prefilter failed:', e);
+        }
+      }
+
+      // 2) Emplacement stock PAM uniquement → réduire au set des parents présents dans le dépôt choisi
+      if (filterPAMStockLocation) {
+        const norm = (s: string) => (s || '').replace(/\u00A0/g, ' ').trim().toUpperCase();
+        try {
+          // Trouver l'ID du dépôt par son nom
+          const { data: depotRow, error: depotErr } = await supabase
+            .from('stocks')
+            .select('id,name')
+            .eq('name' as any, filterPAMStockLocation as any)
+            .maybeSingle();
+          let depot: any = depotRow || null;
+          if ((!depot || !depot.id) && !depotErr) {
+            const { data: allStocks } = await supabase.from('stocks').select('id,name');
+            const match = (Array.isArray(allStocks) ? allStocks : []).find((s: any) => norm(s?.name) === norm(filterPAMStockLocation));
+            if (match) depot = { id: match.id, name: match.name };
+          }
+
+          let parentIds: string[] = [];
+          if (depot?.id) {
+            // A) Via stock_produit → enfants → parents
+            try {
+              const { data: spRows } = await supabase
+                .from('stock_produit')
+                .select('produit_id, quantite')
+                .eq('stock_id' as any, depot.id as any)
+                .gt('quantite' as any, 0 as any)
+                .limit(50000);
+              const childIds = Array.from(new Set(((Array.isArray(spRows) ? spRows : []) as any[]).map((r: any) => r?.produit_id).filter(Boolean)));
+              if (childIds.length > 0) {
+                const { data: children } = await supabase
+                  .from('products')
+                  .select('id,parent_id')
+                  .in('id', childIds as any);
+                const parentSet = new Set<string>();
+                (Array.isArray(children) ? (children as any[]) : []).forEach((p: any) => {
+                  const pid = (p?.parent_id as string) || (p?.id as string);
+                  if (pid) parentSet.add(pid);
+                });
+                parentIds = Array.from(parentSet);
+              }
+            } catch (e) {
+              console.warn('[PAM prefilter] stock_produit pipeline exception:', e);
+            }
+
+            // B) Fallback via vue products_with_stock si rien trouvé
+            if (parentIds.length === 0) {
+              try {
+                const parentIdsSet = new Set<string>();
+                const { data: rowsA } = await supabase
+                  .from('products_with_stock')
+                  .select('parent_id')
+                  .eq('stock_id' as any, depot.id as any)
+                  .not('parent_id', 'is', null)
+                  .limit(50000);
+                (Array.isArray(rowsA) ? rowsA as any[] : []).forEach((r: any) => { if (r?.parent_id) parentIdsSet.add(r.parent_id as string); });
+
+                if (parentIdsSet.size === 0) {
+                  const { data: rowsB } = await supabase
+                    .from('products_with_stock')
+                    .select('parent_id')
+                    .eq('stock' as any, depot.id as any)
+                    .not('parent_id', 'is', null)
+                    .limit(50000);
+                  (Array.isArray(rowsB) ? rowsB as any[] : []).forEach((r: any) => { if (r?.parent_id) parentIdsSet.add(r.parent_id as string); });
+                }
+                parentIds = Array.from(parentIdsSet);
+              } catch (e) {
+                console.warn('[PAM prefilter] products_with_stock fallback exception:', e);
+              }
+            }
+          }
+
+          // Appliquer comme contrainte d’IDs
+          idConstraint = intersectIds(idConstraint, parentIds);
+        } catch (e) {
+          console.error('PAM depot prefilter error:', e);
+          idConstraint = intersectIds(idConstraint, []); // aucun résultat
+        }
+      }
+
+      // 3) Appliquer la contrainte d'ID au queryBuilder (intersection de tous les filtres spéciaux)
+      if (idConstraint) {
+        if (idConstraint.size === 0) {
+          queryBuilder = queryBuilder.eq('id' as any, '00000000-0000-0000-0000-000000000000' as any);
+        } else {
+          queryBuilder = queryBuilder.in('id' as any, Array.from(idConstraint) as any);
+        }
+      }
+
       // Adapter la limite pour garantir que tous les parents de lots soient récupérés
       let limitValue = 50;
       // Recherche active: supprimer ORDER BY côté DB et plafonner la limite à 1000 (tri local prendra le relai)
       const normalizedForLimit = normalizeQuery(query || '');
       const tokensForLimit = normalizedForLimit.split(' ').filter(Boolean).slice(0, 5);
       // Logiques existantes conservées (PAM/lot parents)
-      if (filterPAMStockLocation) {
+      if (false && filterPAMStockLocation) {
         limitValue = 1000;
       }
       if (filterProductType.includes('lot_parent') && lotParentIdsSet.size > 50) {
@@ -678,7 +797,7 @@ export const Products: React.FC = () => {
       }
 
       // Filtre type produit supplémentaire (parent miroir, lot parent)
-      if (filterProductType.includes('mirror_parent')) {
+      if (false && filterProductType.includes('mirror_parent')) {
         try {
           const { data: mirrorRows, error: mirrorErr } = await supabase
             .from('products')
