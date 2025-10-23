@@ -53,6 +53,11 @@ export const Products: React.FC = () => {
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const { navigateToProduct } = useNavigate();
 
+  const [totalCount, setTotalCount] = useState<number>(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [isExportingAll, setIsExportingAll] = useState(false);
+
   // États des filtres
   const [filterType, setFilterType] = useState<string>('');
   const [filterBrand, setFilterBrand] = useState<string>('');
@@ -478,8 +483,8 @@ export const Products: React.FC = () => {
           let depot: any = depotRow || null;
           if ((!depot || !depot.id) && !depotErr) {
             const { data: allStocks } = await supabase.from('stocks').select('id,name');
-            const match = (Array.isArray(allStocks) ? allStocks : []).find((s: any) => norm(s?.name) === norm(filterPAMStockLocation));
-            if (match) depot = { id: match.id, name: match.name };
+            const match: any = (Array.isArray(allStocks) ? (allStocks as any[]) : []).find((s: any) => norm(s?.name) === norm(filterPAMStockLocation));
+            if (match) depot = { id: (match as any).id, name: (match as any).name } as any;
           }
 
           let parentIds: string[] = [];
@@ -554,25 +559,72 @@ export const Products: React.FC = () => {
         }
       }
 
-      // Adapter la limite pour garantir que tous les parents de lots soient récupérés
-      let limitValue = 50;
-      // Recherche active: supprimer ORDER BY côté DB et plafonner la limite à 1000 (tri local prendra le relai)
+      // Pagination + comptage total
       const normalizedForLimit = normalizeQuery(query || '');
       const tokensForLimit = normalizedForLimit.split(' ').filter(Boolean).slice(0, 5);
-      // Logiques existantes conservées (PAM/lot parents)
-      if (false && filterPAMStockLocation) {
-        limitValue = 1000;
+      const offset = Math.max(0, (page - 1) * pageSize);
+
+      // Total count (requête dédiée, même périmètre principal simplifié)
+      try {
+        let countQ = supabase.from('products').select('id', { count: 'exact', head: true });
+
+        // Filtres catégorie (recalcule ids, périmètre exact)
+        if (filterType || filterBrand || filterModel) {
+          let cq = supabase.from('product_categories').select('id');
+          if (filterType) cq = cq.eq('type' as any, filterType as any);
+          if (filterBrand) cq = cq.eq('brand' as any, filterBrand as any);
+          if (filterModel) cq = cq.eq('model' as any, filterModel as any);
+          const { data: catRows } = await cq;
+          const catIds = (catRows as any[] || []).map((c: any) => c.id);
+          if (catIds.length === 0) {
+            setTotalCount(0);
+          } else {
+            countQ = countQ.in('category_id' as any, catIds as any);
+          }
+        }
+
+        // Filtres type de produit (PAU/PAM)
+        if (filterProductType.length > 0) {
+          const typesForDB = filterProductType.filter(t => t === 'PAU' || t === 'PAM');
+          if (typesForDB.length > 0) {
+            countQ = countQ.in('product_type' as any, typesForDB as any);
+          }
+        }
+
+        // Recherche texte
+        if (normalizedForLimit.length >= 2) {
+          if (tokensForLimit.length > 0) {
+            const andName = tokensForLimit.map(t => `name.ilike.%${t}%`).join(',');
+            const orGroup = `and(${andName}),sku.ilike.%${normalizedForLimit}%,ean.ilike.%${normalizedForLimit}%`;
+            countQ = (countQ as any).or(orGroup);
+          } else {
+            countQ = (countQ as any).or(`sku.ilike.%${normalizedForLimit}%,ean.ilike.%${normalizedForLimit}%`);
+          }
+        }
+
+        // Contrainte d'IDs (filtres spéciaux intersectés)
+        if (idConstraint) {
+          if (idConstraint.size === 0) {
+            setTotalCount(0);
+          } else {
+            countQ = countQ.in('id' as any, Array.from(idConstraint) as any);
+          }
+        }
+
+        const { count: total } = await countQ;
+        if (typeof total === 'number') setTotalCount(total);
+      } catch (e) {
+        console.warn('count_failed', e);
       }
-      if (filterProductType.includes('lot_parent') && lotParentIdsSet.size > 50) {
-        limitValue = Math.max(limitValue, lotParentIdsSet.size);
-      }
+
+      // Récupération page de données
       if (tokensForLimit.length > 0) {
-        // Recherche texte active: pas d'ORDER BY côté DB, élargir vraiment la fenêtre
-        limitValue = 1000;
-        queryBuilder = queryBuilder.limit(limitValue);
+        // Recherche texte: on charge p*pageSize pour trier localement par pertinence
+        const fetchLimit = Math.min(1000, page * pageSize);
+        queryBuilder = queryBuilder.limit(fetchLimit);
       } else {
-        // Recherche vide: conserver ORDER BY desc (comportement historique)
-        queryBuilder = queryBuilder.order('created_at', { ascending: false }).limit(limitValue);
+        // Pas de recherche: tri par date desc côté DB + pagination serveur
+        queryBuilder = queryBuilder.order('created_at', { ascending: false }).range(offset, offset + pageSize - 1);
       }
 
       const { data, error } = await queryBuilder;
@@ -643,9 +695,9 @@ export const Products: React.FC = () => {
               .from('stocks')
               .select('id,name');
             if (!allErr && Array.isArray(allStocks)) {
-              const match = (allStocks as any[]).find((s: any) => norm(s?.name) === norm(filterPAMStockLocation));
+              const match: any = (allStocks as any[]).find((s: any) => norm(s?.name) === norm(filterPAMStockLocation));
               if (match) {
-                depot = { id: match.id, name: match.name } as any;
+                depot = { id: (match as any).id, name: (match as any).name } as any;
               }
             }
           }
@@ -924,6 +976,8 @@ export const Products: React.FC = () => {
           });
           console.table(scored.slice(0, 10).map(({ p, score }) => ({ name: p?.name, score })));
           results = scored.map(x => x.p);
+          const offset2 = Math.max(0, (page - 1) * pageSize);
+          results = results.slice(offset2, offset2 + pageSize);
         }
       }
 
@@ -953,7 +1007,9 @@ export const Products: React.FC = () => {
     filterSupplier,
     filterLocation,
     lots,
-    filterPAMStockLocation
+    filterPAMStockLocation,
+    page,
+    pageSize
   ]);
 
   // Appliquer les filtres automatiquement quand ils changent
@@ -979,6 +1035,8 @@ export const Products: React.FC = () => {
     filterSupplier,
     filterLocation,
     filterPAMStockLocation,
+    page,
+    pageSize,
     applyFilters
   ]);
 
@@ -1322,6 +1380,93 @@ export const Products: React.FC = () => {
 
 
 
+  // Exporter toutes les pages filtrées (balayage serveur)
+  const exportAllFiltered = async () => {
+    if (isExportingAll) return;
+    try {
+      setIsExportingAll(true);
+      const all: any[] = [];
+      const pageChunk = 500;
+
+      const buildBase = async () => {
+        let b = supabase.from('products').select(`
+          *,
+          stocks:stock_produit (
+            quantite,
+            stock:stocks ( name )
+          ),
+          category:product_categories!products_category_id_fkey ( type, brand, model )
+        `);
+
+        const normQ = normalizeQuery(currentSearchQuery || '');
+        const toks = normQ.split(' ').filter(Boolean).slice(0, 5);
+        if (normQ.length >= 2) {
+          if (toks.length > 0) {
+            const andName = toks.map(t => `name.ilike.%${t}%`).join(',');
+            const orGroup = `and(${andName}),sku.ilike.%${normQ}%,ean.ilike.%${normQ}%`;
+            b = (b as any).or(orGroup);
+          } else {
+            b = (b as any).or(`sku.ilike.%${normQ}%,ean.ilike.%${normQ}%`);
+          }
+        }
+
+        if (filterType || filterBrand || filterModel) {
+          let cq = supabase.from('product_categories').select('id');
+          if (filterType) cq = cq.eq('type' as any, filterType as any);
+          if (filterBrand) cq = cq.eq('brand' as any, filterBrand as any);
+          if (filterModel) cq = cq.eq('model' as any, filterModel as any);
+          const { data: catRows } = await cq;
+          const catIds = (catRows as any[] || []).map((c: any) => c.id);
+          if (catIds.length === 0) return null;
+          b = b.in('category_id' as any, catIds as any);
+        }
+
+        if (filterProductType.length > 0) {
+          const typesForDB = filterProductType.filter(t => t === 'PAU' || t === 'PAM');
+          if (typesForDB.length > 0) b = b.in('product_type' as any, typesForDB as any);
+        }
+
+        // Contrainte minimaliste via les IDs visibles si filtres spéciaux actifs
+        if (filterPAMStockLocation || filterProductType.includes('mirror_parent')) {
+          const visibleIds = (filteredProducts || []).map((p: any) => p.id).filter(Boolean);
+          if (visibleIds.length > 0) {
+            b = b.in('id' as any, Array.from(new Set(visibleIds)) as any);
+          }
+        }
+
+        return b;
+      };
+
+      if (totalCount <= 0) {
+        window.alert('Aucun résultat à exporter.');
+        return;
+      }
+
+      for (let off = 0; off < totalCount; off += pageChunk) {
+        let base = await buildBase();
+        if (!base) break;
+        const { data } = await (base as any)
+          .order('created_at', { ascending: false })
+          .range(off, Math.min(off + pageChunk - 1, totalCount - 1));
+        if (Array.isArray(data) && data.length > 0) {
+          all.push(...data);
+        }
+      }
+
+      if (all.length === 0) {
+        window.alert('Aucun résultat à exporter.');
+        return;
+      }
+
+      await exportProducts(all as any, 'recherche');
+    } catch (e) {
+      console.error('Export filtré (toutes pages) échoué:', e);
+      window.alert('Export filtré (toutes pages) échoué. Voir la console.');
+    } finally {
+      setIsExportingAll(false);
+    }
+  };
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex justify-between items-center">
@@ -1340,6 +1485,9 @@ export const Products: React.FC = () => {
                 Effacer
               </button>
             )}
+            <span className="text-sm text-gray-600 whitespace-nowrap">
+              {isSearching ? 'Chargement…' : `${totalCount} résultats`}
+            </span>
           </div>
         </div>
         <div className="flex items-center gap-4">
@@ -1662,6 +1810,15 @@ export const Products: React.FC = () => {
               </div>
             )}
           </div>
+          <button
+            onClick={exportAllFiltered}
+            disabled={isExportingAll || totalCount === 0}
+            className={`flex items-center gap-2 px-4 py-2 rounded-md ${isExportingAll || totalCount === 0 ? 'bg-gray-300 text-gray-600 cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}
+            title="Exporter tout le filtré (toutes les pages)"
+          >
+            <Download size={18} />
+            Exporter filtré (toutes pages)
+          </button>
         </div>
       </div>
 
@@ -2088,6 +2245,39 @@ export const Products: React.FC = () => {
 
           </div>
         )}
+      </div>
+
+      <div className="flex items-center justify-between py-3">
+        <div className="text-sm text-gray-700">
+          {totalCount > 0 ? `${Math.min((page - 1) * pageSize + 1, totalCount)}–${Math.min(page * pageSize, totalCount)} sur ${totalCount}` : '0 résultat'}
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={pageSize}
+            onChange={(e) => { setPage(1); setPageSize(parseInt(e.target.value) || 50); }}
+            className="px-2 py-1 border border-gray-300 rounded"
+            title="Éléments par page"
+          >
+            <option value={25}>25 / page</option>
+            <option value={50}>50 / page</option>
+            <option value={100}>100 / page</option>
+            <option value={200}>200 / page</option>
+          </select>
+          <button
+            onClick={() => setPage(p => Math.max(1, p - 1))}
+            disabled={page === 1 || isSearching}
+            className="px-3 py-1 border border-gray-300 rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+          >
+            Précédent
+          </button>
+          <button
+            onClick={() => setPage(p => (p * pageSize < totalCount ? p + 1 : p))}
+            disabled={page * pageSize >= totalCount || isSearching}
+            className="px-3 py-1 border border-gray-300 rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+          >
+            Suivant
+          </button>
+        </div>
       </div>
 
       <ProductList
