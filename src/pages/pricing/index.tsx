@@ -106,6 +106,13 @@ export default function MarketplacePricing() {
   const [unmappedRows, setUnmappedRows] = useState<PricingListing[]>([]);
   const [selectedUnmapped, setSelectedUnmapped] = useState<Record<string, boolean>>({});
 
+  const [loadingProgress, setLoadingProgress] = useState<{ open: boolean; current: number; total: number; done: boolean }>({
+    open: false,
+    current: 0,
+    total: 0,
+    done: false
+  });
+
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -174,6 +181,48 @@ export default function MarketplacePricing() {
   useEffect(() => {
     setAutoLinkAttempted(false);
   }, [selectedAccountId, currentPage]);
+
+  // Charger depuis le cache local si disponible (évite de recharger à chaque retour)
+  useEffect(() => {
+    if (!selectedAccountId) return;
+    try {
+      const key = `pricing_cache:ebay:${selectedAccountId}`;
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.listings)) {
+          setListings(parsed.listings);
+          setUseAllLocal(true);
+          setTotalCount(Number(parsed.total) || parsed.listings.length);
+          if (parsed.filters) {
+            setFilters((prev) => ({ ...prev, ...parsed.filters }));
+          }
+          if (parsed.currentPage) {
+            setCurrentPage(Number(parsed.currentPage) || 1);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('⚠️ cache_load_failed', (e as any)?.message || e);
+    }
+  }, [selectedAccountId]);
+
+  // Sauvegarder dans le cache local quand on travaille en mémoire
+  useEffect(() => {
+    if (!selectedAccountId || !useAllLocal) return;
+    try {
+      const key = `pricing_cache:ebay:${selectedAccountId}`;
+      const payload = {
+        listings,
+        total: totalCount,
+        filters,
+        currentPage
+      };
+      localStorage.setItem(key, JSON.stringify(payload));
+    } catch (e) {
+      console.warn('⚠️ cache_save_failed', (e as any)?.message || e);
+    }
+  }, [listings, filters, currentPage, useAllLocal, selectedAccountId, totalCount]);
 
   // Fetch listings quand accountId, filters ou page changent
   useEffect(() => {
@@ -663,6 +712,7 @@ export default function MarketplacePricing() {
       const js1 = await resp1.json();
       const total = Number(js1.total || js1.count || 0);
       const totalPages = Math.max(1, Math.ceil(total / limit));
+      setLoadingProgress({ open: true, current: 1, total: totalPages, done: false });
 
       const mapBySku = new Map<string, PricingListing>();
       // Map page 1
@@ -729,6 +779,7 @@ export default function MarketplacePricing() {
         }));
         mappedP.forEach(m => { if (m.remote_sku) mapBySku.set(m.remote_sku, m); });
         // Throttle léger
+        setLoadingProgress(prev => ({ ...prev, current: Math.min(prev.total, p) }));
         await sleep(150);
       }
 
@@ -756,6 +807,7 @@ export default function MarketplacePricing() {
       setListings(all);
       setTotalCount(all.length);
       setUseAllLocal(true);
+      setLoadingProgress(prev => ({ ...prev, current: prev.total || all.length, done: true }));
       setToast({ message: `Chargé: ${all.length} produits`, type: 'success' });
     } catch (e: any) {
       setToast({ message: `Erreur chargement: ${e.message || e}`, type: 'error' });
@@ -825,6 +877,10 @@ export default function MarketplacePricing() {
     setUseAllLocal(false);
     setReloadToken(x => x + 1);
     setToast({ message: 'Rechargement depuis eBay…', type: 'success' });
+  };
+
+  const closeProgressModal = () => {
+    setLoadingProgress({ open: false, current: 0, total: 0, done: false });
   };
 
   const openUnmappedModal = () => {
@@ -942,6 +998,15 @@ export default function MarketplacePricing() {
 
   const clearAllDiff = () => {
     setSelectedDiff({});
+  };
+
+  const handleCreateBySku = (sku: string) => {
+    const row = listings.find(l => l.remote_sku === sku);
+    if (!row?.remote_id) {
+      setToast({ message: `Impossible de créer: SKU ${sku} introuvable`, type: 'error' });
+      return;
+    }
+    handleCreate(row.remote_id);
   };
 
   const handleResolveBySku = (sku: string) => {
@@ -1111,12 +1176,21 @@ export default function MarketplacePricing() {
                        it?.status || '—'}
                     </td>
                     <td className="px-2 py-1">
-                      <button
-                        onClick={() => handleResolveBySku(it?.remote_sku)}
-                        className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
-                      >
-                        Lier…
-                      </button>
+                      {it?.status === 'not_found' ? (
+                        <button
+                          onClick={() => handleCreateBySku(it?.remote_sku)}
+                          className="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
+                        >
+                          Créer l’article
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleResolveBySku(it?.remote_sku)}
+                          className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
+                        >
+                          Lier…
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1151,7 +1225,7 @@ export default function MarketplacePricing() {
             className="px-4 py-2 rounded-md bg-amber-600 text-white hover:bg-amber-700"
             title="Afficher les produits non mappés et lier en masse par SKU"
           >
-            Non mappés
+            {`Non mappés (${listings.filter(l => !l.is_mapped).length})`}
           </button>
           <button
             onClick={openDiffModal}
@@ -1454,6 +1528,41 @@ export default function MarketplacePricing() {
               >
                 Envoyer vers eBay ({Object.values(selectedDiff).filter(Boolean).length})
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Progress Chargement */}
+      {loadingProgress.open && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md shadow-xl">
+            <h2 className="text-lg font-semibold mb-2">Chargement de toutes les pages</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Pages {Math.min(loadingProgress.current, loadingProgress.total)} / {loadingProgress.total}
+            </p>
+            <div className="w-full bg-gray-200 rounded h-3 overflow-hidden mb-4">
+              <div
+                className="bg-blue-600 h-3"
+                style={{ width: `${Math.min(100, Math.round((Math.min(loadingProgress.current, loadingProgress.total) / Math.max(1, loadingProgress.total)) * 100))}%` }}
+              />
+            </div>
+            <div className="flex justify-end">
+              {loadingProgress.done ? (
+                <button
+                  onClick={closeProgressModal}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                >
+                  OK
+                </button>
+              ) : (
+                <button
+                  disabled
+                  className="px-4 py-2 bg-gray-200 text-gray-500 rounded-md cursor-not-allowed"
+                >
+                  Chargement…
+                </button>
+              )}
             </div>
           </div>
         </div>
