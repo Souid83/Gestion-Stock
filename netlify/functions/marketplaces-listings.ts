@@ -373,14 +373,31 @@ export const handler = async (event: any) => {
 
         const { data: prodRows } = await supabaseService
           .from('products')
-          .select('id, shared_stock_id, stock_total, stock, retail_price')
+          .select('id, mirror_of, shared_stock_id, stock_total, stock, retail_price')
           .in('id', productIds);
 
         const qtyByProductId: Record<string, number | null> = {};
         const internalPriceByProductId: Record<string, number | null> = {};
 
-        // Load pool quantities from shared_stocks for products that belong to a shared pool
-        const sharedStockIds = Array.from(new Set((prodRows || []).map((p: any) => p.shared_stock_id).filter(Boolean)));
+        // Merge with mirror parents if any
+        let allVw = vw || [];
+        let allProdRows = prodRows || [];
+        const parentIds = Array.from(new Set((allProdRows || []).map((p: any) => p.mirror_of).filter(Boolean)));
+        if (parentIds.length > 0) {
+          const { data: vwParents } = await supabaseService
+            .from('products_with_stock')
+            .select('id, shared_quantity')
+            .in('id', parentIds);
+          const { data: parentRows } = await supabaseService
+            .from('products')
+            .select('id, mirror_of, shared_stock_id, stock_total, stock, retail_price')
+            .in('id', parentIds);
+          allVw = [...allVw, ...(vwParents || [])];
+          allProdRows = [...allProdRows, ...(parentRows || [])];
+        }
+
+        // Load pool quantities from shared_stocks for products that belong to a shared pool (including parents)
+        const sharedStockIds = Array.from(new Set((allProdRows || []).map((p: any) => p.shared_stock_id).filter(Boolean)));
         let poolQtyByStockId: Record<string, number | null> = {};
         if (sharedStockIds.length > 0) {
           const { data: pools } = await supabaseService
@@ -394,8 +411,8 @@ export const handler = async (event: any) => {
           });
         }
 
-        // Build internal price map + quantity fallbacks from products table
-        (prodRows || []).forEach((p: any) => {
+        // Build internal price map + quantity fallbacks from products table (including mirror parents)
+        (allProdRows || []).forEach((p: any) => {
           internalPriceByProductId[p.id] =
             typeof p.retail_price === 'number' ? p.retail_price : (p.retail_price ?? null);
 
@@ -405,16 +422,26 @@ export const handler = async (event: any) => {
           // 3) products.stock_total
           // 4) products.stock
           const poolQty = p.shared_stock_id ? poolQtyByStockId[p.shared_stock_id] : null;
-          const shared = (vw || []).find((s: any) => s.id === p.id)?.shared_quantity;
+          const shared = (allVw || []).find((s: any) => s.id === p.id)?.shared_quantity;
           const candidates = [poolQty, shared, p.stock_total, p.stock];
           const picked = candidates.find((q) => typeof q === 'number');
           qtyByProductId[p.id] = typeof picked === 'number' ? picked : null;
         });
 
         // If view returned a shared_quantity, it takes precedence
-        (vw || []).forEach((s: any) => {
+        (allVw || []).forEach((s: any) => {
           if (typeof s.shared_quantity === 'number') {
             qtyByProductId[s.id] = s.shared_quantity;
+          }
+        });
+
+        // Mirror children: force child quantity to parent's quantity when available
+        (prodRows || []).forEach((p: any) => {
+          if (p && p.id && p.mirror_of) {
+            const parentQty = qtyByProductId[p.mirror_of];
+            if (typeof parentQty === 'number') {
+              qtyByProductId[p.id] = parentQty;
+            }
           }
         });
 
