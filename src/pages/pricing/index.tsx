@@ -32,6 +32,7 @@ interface PricingListing {
 interface FilterState {
   searchQuery: string;
   unmappedFirst: boolean;
+  diffFirst: boolean;
   statusFilter: 'all' | 'ok' | 'pending' | 'failed';
 }
 
@@ -74,6 +75,7 @@ export default function MarketplacePricing() {
   const [filters, setFilters] = useState<FilterState>({
     searchQuery: '',
     unmappedFirst: true,
+    diffFirst: true,
     statusFilter: 'all'
   });
   const [currentPage, setCurrentPage] = useState(1);
@@ -94,6 +96,10 @@ export default function MarketplacePricing() {
   // Nouveaux états: chargement global (toutes pages) et sync massive
   const [isLoadingAll, setIsLoadingAll] = useState(false);
   const [isBulkSyncing, setIsBulkSyncing] = useState(false);
+  const [useAllLocal, setUseAllLocal] = useState(false);
+  const [showDiffModal, setShowDiffModal] = useState(false);
+  const [diffRows, setDiffRows] = useState<PricingListing[]>([]);
+  const [selectedDiff, setSelectedDiff] = useState<Record<string, boolean>>({});
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -166,7 +172,7 @@ export default function MarketplacePricing() {
 
   // Fetch listings quand accountId, filters ou page changent
   useEffect(() => {
-    if (!selectedAccountId) return;
+    if (!selectedAccountId || useAllLocal) return;
 
     const fetchListings = async () => {
       setIsLoadingListings(true);
@@ -268,6 +274,27 @@ export default function MarketplacePricing() {
           console.warn('⚠️ product_name lookup failed', (e as any)?.message || e);
         }
 
+        try {
+          const skus = Array.from(
+            new Set(mapped.filter(m => !m.product_name && m.remote_sku).map(m => m.remote_sku))
+          );
+          if (skus.length > 0) {
+            const { data: prodBySku } = await supabase
+              .from('products')
+              .select('sku,name')
+              .in('sku', skus as any);
+            const nameBySku: Record<string, string> = {};
+            (prodBySku || []).forEach((p: any) => {
+              if (p?.sku) nameBySku[p.sku] = p.name || '';
+            });
+            mapped = mapped.map(m =>
+              !m.product_name && m.remote_sku ? { ...m, product_name: nameBySku[m.remote_sku] ?? null } : m
+            );
+          }
+        } catch (e) {
+          console.warn('⚠️ product_name fallback by SKU failed', (e as any)?.message || e);
+        }
+
         setListings(mapped);
 
         // Auto-link by SKU on first load for this page, then refetch to display qty_app
@@ -348,20 +375,29 @@ export default function MarketplacePricing() {
       });
     }
 
+    if (filters.diffFirst) {
+      result.sort((a, b) => {
+        const af = a.is_mapped && a.qty_app != null && a.qty_ebay !== a.qty_app ? 0 : 1;
+        const bf = b.is_mapped && b.qty_app != null && b.qty_ebay !== b.qty_app ? 0 : 1;
+        return af - bf;
+      });
+    }
+
     setFilteredListings(result);
   }, [listings, filters]);
 
-  // Prompt to sync quantities when listings updated and mappings exist
+  // Ouvrir la modale des différences automatiquement si des écarts existent
   useEffect(() => {
     if (!autoLinkAttempted) return;
-    const mismatches = listings.filter(
+    const miss = listings.filter(
       l => l.is_mapped && l.qty_app != null && l.remote_sku && l.qty_ebay !== l.qty_app
     );
-    if (mismatches.length > 0) {
-      setItemsToSync(
-        mismatches.map(l => ({ sku: l.remote_sku, quantity: l.qty_app as number }))
-      );
-      setShowQtySyncPrompt(true);
+    if (miss.length > 0) {
+      setDiffRows(miss);
+      const init: Record<string, boolean> = {};
+      miss.forEach(m => { if (m.remote_sku) init[m.remote_sku] = true; });
+      setSelectedDiff(init);
+      setShowDiffModal(true);
     }
   }, [listings, autoLinkAttempted]);
 
@@ -372,17 +408,6 @@ export default function MarketplacePricing() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  // Calcul du delta (EUR seulement)
-  const calculateDelta = (priceEur: number | null, internalPrice: number | null): number | null => {
-    if (priceEur == null || internalPrice == null) return null;
-    return priceEur - internalPrice;
-  };
-
-  const formatDelta = (delta: number | null) => {
-    if (delta === null) return <span className="text-gray-400">—</span>;
-    const color = delta > 0 ? 'text-green-600' : delta < 0 ? 'text-red-600' : 'text-gray-600';
-    return <span className={color}>{delta >= 0 ? '+' : ''}{delta.toFixed(2)} EUR</span>;
-  };
 
   // Actions
   const handleLinkClick = (remoteId: string, remoteSku: string) => {
@@ -725,6 +750,7 @@ export default function MarketplacePricing() {
 
       setListings(all);
       setTotalCount(all.length);
+      setUseAllLocal(true);
       setToast({ message: `Chargé: ${all.length} produits`, type: 'success' });
     } catch (e: any) {
       setToast({ message: `Erreur chargement: ${e.message || e}`, type: 'error' });
@@ -788,6 +814,59 @@ export default function MarketplacePricing() {
     } finally {
       setIsBulkSyncing(false);
     }
+  };
+
+  const handleReloadFromEbay = () => {
+    setUseAllLocal(false);
+    setReloadToken(x => x + 1);
+    setToast({ message: 'Rechargement depuis eBay…', type: 'success' });
+  };
+
+  const openDiffModal = () => {
+    const miss = listings.filter(
+      l => l.is_mapped && l.qty_app != null && l.remote_sku && l.qty_ebay !== l.qty_app
+    );
+    setDiffRows(miss);
+    const init: Record<string, boolean> = {};
+    miss.forEach(m => { if (m.remote_sku) init[m.remote_sku] = true; });
+    setSelectedDiff(init);
+    if (miss.length > 0) setShowDiffModal(true);
+    else setToast({ message: 'Aucune différence de quantités détectée', type: 'success' });
+  };
+
+  const sendSelectedDiff = async () => {
+    const selectedSkus = Object.keys(selectedDiff).filter(s => selectedDiff[s]);
+    if (selectedSkus.length === 0) {
+      setToast({ message: 'Aucune ligne sélectionnée', type: 'error' });
+      return;
+    }
+    const bySku = new Map(diffRows.map(r => [r.remote_sku, r]));
+    const items = selectedSkus
+      .map(s => {
+        const row = bySku.get(s);
+        return row && typeof row.qty_app === 'number' ? { sku: s, quantity: row.qty_app } : null;
+      })
+      .filter(Boolean) as { sku: string; quantity: number }[];
+
+    await pushQtyBatched(items);
+    setShowDiffModal(false);
+    const miss = listings.filter(
+      l => l.is_mapped && l.qty_app != null && l.remote_sku && l.qty_ebay !== l.qty_app
+    );
+    setDiffRows(miss);
+    const init: Record<string, boolean> = {};
+    miss.forEach(m => { if (m.remote_sku) init[m.remote_sku] = true; });
+    setSelectedDiff(init);
+  };
+
+  const selectAllDiff = () => {
+    const next: Record<string, boolean> = {};
+    diffRows.forEach(r => { if (r.remote_sku) next[r.remote_sku] = true; });
+    setSelectedDiff(next);
+  };
+
+  const clearAllDiff = () => {
+    setSelectedDiff({});
   };
 
   const handleResolveBySku = (sku: string) => {
@@ -903,6 +982,15 @@ export default function MarketplacePricing() {
             />
             Non-mappés d'abord
           </label>
+          <label className="flex items-center gap-2 text-sm whitespace-nowrap">
+            <input
+              type="checkbox"
+              checked={filters.diffFirst}
+              onChange={(e) => setFilters({ ...filters, diffFirst: e.target.checked })}
+              className="rounded"
+            />
+            Différences d'abord
+          </label>
           <select
             value={filters.statusFilter}
             onChange={(e) => setFilters({ ...filters, statusFilter: e.target.value as any })}
@@ -967,12 +1055,28 @@ export default function MarketplacePricing() {
       {selectedAccountId && (
         <div className="flex items-center gap-2">
           <button
+            onClick={handleReloadFromEbay}
+            disabled={isLoadingListings}
+            className="px-4 py-2 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200"
+            title="Recharger en mode serveur depuis eBay"
+          >
+            Recharger depuis eBay
+          </button>
+          <button
             onClick={handleLoadAllListings}
             disabled={isLoadingAll || isLoadingListings}
             className={`px-4 py-2 rounded-md ${isLoadingAll ? 'bg-gray-200 text-gray-500' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
             title="Charger toutes les pages dans la mémoire (pagination client)"
           >
             {isLoadingAll ? 'Chargement…' : 'Charger tout (toutes pages)'}
+          </button>
+          <button
+            onClick={openDiffModal}
+            disabled={isLoadingListings || listings.length === 0}
+            className="px-4 py-2 rounded-md bg-yellow-600 text-white hover:bg-yellow-700"
+            title="Afficher uniquement les produits avec différences de quantités"
+          >
+            Différences
           </button>
           <button
             onClick={handleSyncPage}
@@ -1035,9 +1139,6 @@ export default function MarketplacePricing() {
                         Qté app
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Δ
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Statut sync
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -1084,9 +1185,6 @@ export default function MarketplacePricing() {
                               ? listing.qty_app
                               : <span className="text-gray-400">—</span>
                             }
-                          </td>
-                          <td className="px-4 py-3 text-sm">
-                            {formatDelta(calculateDelta(listing.price_eur, listing.internal_price))}
                           </td>
                           <td className="px-4 py-3">
                             {!listing.is_mapped ? (
@@ -1212,26 +1310,65 @@ export default function MarketplacePricing() {
         </div>
       )}
 
-      {/* Modal Sync quantités */}
-      {showQtySyncPrompt && itemsToSync.length > 0 && (
+      {/* Modal Différences de quantités */}
+      {showDiffModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 w-full max-w-md shadow-xl">
-            <h2 className="text-lg font-semibold mb-3">Mettre à jour les quantités sur eBay</h2>
-            <p className="text-sm text-gray-600 mb-4">
-              {itemsToSync.length} produit(s) ont une différence entre Qté app et Qté eBay. Voulez-vous pousser les quantités de l'app vers eBay maintenant ?
-            </p>
-            <div className="flex justify-end gap-2">
+          <div className="bg-white rounded-lg p-6 w-full max-w-3xl shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Produits avec différences de quantités</h2>
+              <button onClick={() => setShowDiffModal(false)} className="text-gray-500 hover:text-gray-700">✕</button>
+            </div>
+            <div className="flex items-center gap-2 mb-3">
+              <button onClick={selectAllDiff} className="px-3 py-1 border rounded">Tout sélectionner</button>
+              <button onClick={clearAllDiff} className="px-3 py-1 border rounded">Tout désélectionner</button>
+            </div>
+            <div className="max-h-[60vh] overflow-auto border rounded">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-3 py-2 text-left">SKU</th>
+                    <th className="px-3 py-2 text-left">Nom produit (app)</th>
+                    <th className="px-3 py-2 text-left">Qté eBay</th>
+                    <th className="px-3 py-2 text-left">Qté app</th>
+                    <th className="px-3 py-2 text-left">Sélection</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {diffRows.map(r => (
+                    <tr key={r.remote_id} className="border-t">
+                      <td className="px-3 py-2 font-mono">{r.remote_sku}</td>
+                      <td className="px-3 py-2">{r.product_name || r.title || '—'}</td>
+                      <td className="px-3 py-2">{r.qty_ebay ?? '—'}</td>
+                      <td className="px-3 py-2">{r.qty_app ?? '—'}</td>
+                      <td className="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedDiff[r.remote_sku]}
+                          onChange={(e) => setSelectedDiff(prev => ({ ...prev, [r.remote_sku]: e.target.checked }))}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                  {diffRows.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="px-3 py-4 text-center text-gray-500">Aucune différence détectée</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
               <button
-                onClick={() => setShowQtySyncPrompt(false)}
+                onClick={() => setShowDiffModal(false)}
                 className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
               >
-                Plus tard
+                Fermer
               </button>
               <button
-                onClick={confirmBulkQtySync}
+                onClick={sendSelectedDiff}
                 className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700"
               >
-                Mettre à jour maintenant
+                Envoyer vers eBay ({Object.values(selectedDiff).filter(Boolean).length})
               </button>
             </div>
           </div>
