@@ -1233,7 +1233,7 @@ export default function MarketplacePricing() {
                     {filteredListings
                       .map(listing => (
                         <tr
-                          key={listing.remote_id}
+                          key={listing.remote_id || listing.remote_sku}
                           className={!listing.is_mapped ? 'bg-orange-50' : ''}
                         >
                           <td className="px-4 py-3">
@@ -1301,8 +1301,9 @@ export default function MarketplacePricing() {
                               )}
                               <button
                                 onClick={() => handleCreate(listing.remote_id)}
-                                disabled={actionLoading[listing.remote_id]}
+                                disabled={actionLoading[listing.remote_id] || (listing.remote_id?.startsWith('inv:') ?? false)}
                                 className="px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                title={listing.remote_id?.startsWith('inv:') ? 'Pas d’offre eBay existante (ligne inventaire)' : 'Créer'}
                               >
                                 Créer
                               </button>
