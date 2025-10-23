@@ -435,13 +435,18 @@ export const handler = async (event: any) => {
           }
         });
 
-        // Mirror children: force child quantity to parent's quantity when available
+        // Mirror children: force child quantity to parent's quantity when available + debug logs
         (prodRows || []).forEach((p: any) => {
           if (p && p.id && p.mirror_of) {
             const parentQty = qtyByProductId[p.mirror_of];
             if (typeof parentQty === 'number') {
               qtyByProductId[p.id] = parentQty;
             }
+            console.info('mirror_debug', {
+              child_id: p.id,
+              parent_id: p.mirror_of,
+              resolved_parent_qty: typeof parentQty === 'number' ? parentQty : null
+            });
           }
         });
 
@@ -499,7 +504,9 @@ export const handler = async (event: any) => {
     console.info('🔎 Sample offers (sku/price):', sampleOffers);
 
     const defaultCurrency = account.currency || 'EUR';
-    const items = allOffers.map((offer) => ({
+
+    // Real offers coming from eBay "offer" API
+    const itemsOffers = allOffers.map((offer) => ({
       provider: 'ebay',
       marketplace_account_id: account_id,
       remote_id: offer && offer.offerId ? offer.offerId : null,
@@ -525,11 +532,42 @@ export const handler = async (event: any) => {
       updated_at: new Date().toISOString()
     })).filter((it) => it.remote_id);
 
-    // Strip non-persistent fields before DB upsert
-    // Do not persist product_id (only for UI), nor qty_ebay/qty_app
-    const dbItems = items.map(({ qty_ebay, qty_app, product_id, internal_price, ...rest }) => rest);
+    // Inventory placeholders for SKUs present in inventory but with no offer yet
+    const offerSkuSet = new Set(
+      allOffers.map((o: any) => (o && o.sku ? o.sku : null)).filter(Boolean)
+    );
+    const itemsPlaceholders = (skus || [])
+      .filter((sku: string) => !offerSkuSet.has(sku))
+      .map((sku: string) => ({
+        provider: 'ebay',
+        marketplace_account_id: account_id,
+        // Mark as inventory-only row
+        remote_id: `inv:${sku}`,
+        remote_sku: sku,
+        title: '',
+        price_amount: null,
+        price_currency: defaultCurrency,
+        status_sync: 'unmapped' as const,
+        metadata: {
+          listingStatus: null,
+          marketplaceId: null,
+          availableQuantity: null,
+          format: null
+        },
+        product_id: productIdBySku[sku] ?? null,
+        internal_price: internalPriceBySku[sku] ?? null,
+        qty_ebay: typeof qtyEbayBySku[sku] === 'number' ? qtyEbayBySku[sku] : null,
+        qty_app: typeof qtyAppBySku[sku] === 'number' ? qtyAppBySku[sku] : null,
+        updated_at: new Date().toISOString()
+      }));
 
-    console.info('💾 Upserting', items.length, 'items');
+    const items = [...itemsOffers, ...itemsPlaceholders];
+
+    // Strip non-persistent fields before DB upsert (offers only)
+    // Do not persist product_id (only for UI), nor qty_ebay/qty_app
+    const dbItems = itemsOffers.map(({ qty_ebay, qty_app, product_id, internal_price, ...rest }) => rest);
+
+    console.info('💾 Upserting', itemsOffers.length, 'offer items; returning', items.length, 'total items incl. placeholders');
 
     if (items.length > 0) {
       const { error: upsertError } = await supabaseService
