@@ -905,24 +905,17 @@ function App() {
               <div className="bg-[#24303a] py-2">
                 <a
                   href="#"
-                  onClick={() => setCurrentPage('quotes-list')}
-                  className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
-                >
-                  Devis
-                </a>
-                <a
-                  href="#"
-                  onClick={() => setCurrentPage('orders-list')}
-                  className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
-                >
-                  Commandes
-                </a>
-                <a
-                  href="#"
                   onClick={() => setCurrentPage('invoices-list')}
                   className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
                 >
                   Factures
+                </a>
+                <a
+                  href="#"
+                  onClick={() => setCurrentPage('quotes-list')}
+                  className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
+                >
+                  Devis
                 </a>
                 <a
                   href="#"
@@ -936,7 +929,7 @@ function App() {
                   onClick={() => setCurrentPage('document-types')}
                   className="px-8 py-2 flex items-center text-gray-300 hover:bg-[#1a242d]"
                 >
-                  Typages
+                  Gestion des Typages
                 </a>
               </div>
             )}
