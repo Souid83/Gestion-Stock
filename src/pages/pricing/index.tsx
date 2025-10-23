@@ -22,6 +22,7 @@ interface PricingListing {
   price_eur: number | null;
   internal_price: number | null;
   product_id: string | null;
+  product_name?: string | null; // Nom produit (app) pour affichage
   sync_status: 'ok' | 'pending' | 'failed' | 'unmapped';
   is_mapped: boolean;
   qty_ebay?: number | null;
@@ -89,6 +90,10 @@ export default function MarketplacePricing() {
   const [itemsToSync, setItemsToSync] = useState<{ sku: string; quantity: number }[]>([]);
   const [autoLinkAttempted, setAutoLinkAttempted] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
+
+  // Nouveaux états: chargement global (toutes pages) et sync massive
+  const [isLoadingAll, setIsLoadingAll] = useState(false);
+  const [isBulkSyncing, setIsBulkSyncing] = useState(false);
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -212,7 +217,7 @@ export default function MarketplacePricing() {
         setTotalCount(data.total || data.count || 0);
 
         // Map backend shape → UI PricingListing shape
-        const mapped: PricingListing[] = (data.items || []).map((it: any) => {
+        let mapped: PricingListing[] = (data.items || []).map((it: any) => {
           const priceAmount =
             typeof it?.price_amount === 'number'
               ? it.price_amount
@@ -239,6 +244,29 @@ export default function MarketplacePricing() {
             qty_app: typeof it?.qty_app === 'number' ? it.qty_app : (it?.qty_app ?? null)
           };
         });
+
+        // Lookup noms produits (app) pour meilleure lisibilité
+        try {
+          const ids = Array.from(
+            new Set(mapped.map(m => m.product_id).filter((v): v is string => !!v))
+          );
+          if (ids.length > 0) {
+            const { data: prodNames } = await supabase
+              .from('products')
+              .select('id,name')
+              .in('id', ids as any);
+            const nameById: Record<string, string> = {};
+            (prodNames || []).forEach((p: any) => {
+              if (p?.id) nameById[p.id] = p.name || '';
+            });
+            mapped = mapped.map(m => ({
+              ...m,
+              product_name: m.product_id ? (nameById[m.product_id] ?? null) : null
+            }));
+          }
+        } catch (e) {
+          console.warn('⚠️ product_name lookup failed', (e as any)?.message || e);
+        }
 
         setListings(mapped);
 
@@ -569,6 +597,199 @@ export default function MarketplacePricing() {
     }
   };
 
+  // Utils
+  const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
+  const chunk = <T,>(arr: T[], size = 100) => {
+    const out: T[][] = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  };
+
+  // Charger toutes les pages une seule fois et conserver en mémoire
+  const handleLoadAllListings = async () => {
+    if (!selectedAccountId) return;
+    try {
+      setIsLoadingAll(true);
+      setToast({ message: 'Chargement de toutes les pages…', type: 'success' });
+
+      const limit = itemsPerPage;
+      // Première page pour connaître total
+      const params1 = new URLSearchParams({
+        provider: selectedProvider,
+        account_id: selectedAccountId,
+        q: filters.searchQuery,
+        // Toujours charger tout, pas uniquement les unmapped
+        only_unmapped: 'false',
+        status: filters.statusFilter,
+        page: '1',
+        limit: String(limit),
+        offset: '0'
+      });
+      const resp1 = await fetch(`/.netlify/functions/marketplaces-listings?${params1}`);
+      if (!resp1.ok) {
+        const t = await resp1.text();
+        throw new Error(`HTTP ${resp1.status} ${t.substring(0, 120)}`);
+      }
+      const js1 = await resp1.json();
+      const total = Number(js1.total || js1.count || 0);
+      const totalPages = Math.max(1, Math.ceil(total / limit));
+
+      const mapBySku = new Map<string, PricingListing>();
+      // Map page 1
+      const page1Items: any[] = Array.isArray(js1.items) ? js1.items : [];
+      let mapped: PricingListing[] = page1Items.map((it: any) => ({
+        remote_id: it?.remote_id || '',
+        remote_sku: it?.remote_sku || '',
+        title: it?.title || '',
+        price: typeof it?.price_amount === 'number' ? it.price_amount : (it?.price_amount ? parseFloat(it.price_amount) : null),
+        price_currency: it?.price_currency || 'EUR',
+        price_eur: null,
+        internal_price: null,
+        product_id: it?.product_id || null,
+        product_name: null,
+        sync_status: ((): any => {
+          const s = (it?.status_sync || '').toString();
+          return s === 'ok' || s === 'pending' || s === 'failed' ? s : 'unmapped';
+        })(),
+        is_mapped: !!it?.product_id || false,
+        qty_ebay: typeof it?.qty_ebay === 'number' ? it.qty_ebay : (it?.qty_ebay ?? null),
+        qty_app: typeof it?.qty_app === 'number' ? it.qty_app : (it?.qty_app ?? null)
+      }));
+      mapped.forEach(m => { if (m.remote_sku) mapBySku.set(m.remote_sku, m); });
+
+      // Pages suivantes
+      for (let p = 2; p <= totalPages; p++) {
+        const offset = String((p - 1) * limit);
+        const params = new URLSearchParams({
+          provider: selectedProvider,
+          account_id: selectedAccountId,
+          q: filters.searchQuery,
+          only_unmapped: 'false',
+          status: filters.statusFilter,
+          page: String(p),
+          limit: String(limit),
+          offset
+        });
+        const resp = await fetch(`/.netlify/functions/marketplaces-listings?${params}`);
+        if (!resp.ok) {
+          const t = await resp.text();
+          console.warn(`Page ${p} failed: HTTP ${resp.status} ${t.substring(0, 120)}`);
+          await sleep(200);
+          continue;
+        }
+        const js = await resp.json();
+        const items: any[] = Array.isArray(js.items) ? js.items : [];
+        const mappedP: PricingListing[] = items.map((it: any) => ({
+          remote_id: it?.remote_id || '',
+          remote_sku: it?.remote_sku || '',
+          title: it?.title || '',
+          price: typeof it?.price_amount === 'number' ? it.price_amount : (it?.price_amount ? parseFloat(it.price_amount) : null),
+          price_currency: it?.price_currency || 'EUR',
+          price_eur: null,
+          internal_price: null,
+          product_id: it?.product_id || null,
+          product_name: null,
+          sync_status: ((): any => {
+            const s = (it?.status_sync || '').toString();
+            return s === 'ok' || s === 'pending' || s === 'failed' ? s : 'unmapped';
+          })(),
+          is_mapped: !!it?.product_id || false,
+          qty_ebay: typeof it?.qty_ebay === 'number' ? it.qty_ebay : (it?.qty_ebay ?? null),
+          qty_app: typeof it?.qty_app === 'number' ? it.qty_app : (it?.qty_app ?? null)
+        }));
+        mappedP.forEach(m => { if (m.remote_sku) mapBySku.set(m.remote_sku, m); });
+        // Throttle léger
+        await sleep(150);
+      }
+
+      // Fusion finale + lookup noms produits
+      const all = Array.from(mapBySku.values());
+      try {
+        const ids = Array.from(new Set(all.map(m => m.product_id).filter((v): v is string => !!v)));
+        if (ids.length > 0) {
+          const { data: prodNames } = await supabase
+            .from('products')
+            .select('id,name')
+            .in('id', ids as any);
+          const nameById: Record<string, string> = {};
+          (prodNames || []).forEach((p: any) => {
+            if (p?.id) nameById[p.id] = p.name || '';
+          });
+          for (const m of all) {
+            if (m.product_id) m.product_name = nameById[m.product_id] ?? null;
+          }
+        }
+      } catch (e) {
+        console.warn('⚠️ product_name lookup (all) failed', (e as any)?.message || e);
+      }
+
+      setListings(all);
+      setTotalCount(all.length);
+      setToast({ message: `Chargé: ${all.length} produits`, type: 'success' });
+    } catch (e: any) {
+      setToast({ message: `Erreur chargement: ${e.message || e}`, type: 'error' });
+    } finally {
+      setIsLoadingAll(false);
+    }
+  };
+
+  // Sync page courante: pousse qty_app -> eBay pour la page affichée
+  const handleSyncPage = async () => {
+    if (!selectedAccountId) return;
+    const start = (currentPage - 1) * itemsPerPage;
+    const end = Math.min(currentPage * itemsPerPage, filteredListings.length);
+    const pageRows = filteredListings.slice(start, end);
+    const items = pageRows
+      .filter(l => l.remote_sku && typeof l.qty_app === 'number')
+      .map(l => ({ sku: l.remote_sku, quantity: l.qty_app as number }));
+
+    if (items.length === 0) {
+      setToast({ message: 'Aucune quantité à pousser sur cette page', type: 'error' });
+      return;
+    }
+    await pushQtyBatched(items);
+  };
+
+  // Sync tout: pousse qty_app -> eBay pour tout le filtré affiché (ou tout)
+  const handleSyncAll = async () => {
+    if (!selectedAccountId) return;
+    const items = filteredListings
+      .filter(l => l.remote_sku && typeof l.qty_app === 'number')
+      .map(l => ({ sku: l.remote_sku, quantity: l.qty_app as number }));
+    if (items.length === 0) {
+      setToast({ message: 'Aucune quantité à pousser', type: 'error' });
+      return;
+    }
+    await pushQtyBatched(items);
+  };
+
+  const pushQtyBatched = async (items: { sku: string; quantity: number }[]) => {
+    try {
+      setIsBulkSyncing(true);
+      setToast({ message: `Sync quantités… (${items.length})`, type: 'success' });
+      const batches = chunk(items, 100);
+      for (let i = 0; i < batches.length; i++) {
+        const resp = await fetch('/.netlify/functions/marketplaces-stock-update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ account_id: selectedAccountId, items: batches[i] })
+        });
+        if (!resp.ok) {
+          const t = await resp.text();
+          throw new Error(`HTTP ${resp.status} ${t.substring(0, 120)}`);
+        }
+        await sleep(100);
+      }
+      const skuSet = new Set(items.map(i => i.sku));
+      setListings(prev => prev.map(l => (skuSet.has(l.remote_sku) ? { ...l, qty_ebay: l.qty_app ?? l.qty_ebay } : l)));
+      setToast({ message: `Quantités mises à jour (${items.length})`, type: 'success' });
+    } catch (e: any) {
+      setToast({ message: `Erreur sync: ${e.message || e}`, type: 'error' });
+    } finally {
+      setIsBulkSyncing(false);
+    }
+  };
+
   const handleResolveBySku = (sku: string) => {
     // Ouvre la modale de lien sur la première ligne correspondante
     const row = listings.find(l => l.remote_sku === sku && !l.is_mapped);
@@ -746,25 +967,28 @@ export default function MarketplacePricing() {
       {selectedAccountId && (
         <div className="flex items-center gap-2">
           <button
-            disabled
-            title="Fonctionnalité bientôt disponible"
-            className="px-4 py-2 bg-gray-200 text-gray-500 rounded-md cursor-not-allowed"
+            onClick={handleLoadAllListings}
+            disabled={isLoadingAll || isLoadingListings}
+            className={`px-4 py-2 rounded-md ${isLoadingAll ? 'bg-gray-200 text-gray-500' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+            title="Charger toutes les pages dans la mémoire (pagination client)"
           >
-            Sync sélection
+            {isLoadingAll ? 'Chargement…' : 'Charger tout (toutes pages)'}
           </button>
           <button
-            disabled
-            title="Fonctionnalité bientôt disponible"
-            className="px-4 py-2 bg-gray-200 text-gray-500 rounded-md cursor-not-allowed"
+            onClick={handleSyncPage}
+            disabled={isBulkSyncing || isLoadingListings}
+            className={`px-4 py-2 rounded-md ${isBulkSyncing ? 'bg-gray-200 text-gray-500' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}
+            title="Pousser les quantités de la page courante vers eBay"
           >
-            Sync page
+            {isBulkSyncing ? 'Sync…' : 'Sync page'}
           </button>
           <button
-            disabled
-            title="Fonctionnalité bientôt disponible"
-            className="px-4 py-2 bg-gray-200 text-gray-500 rounded-md cursor-not-allowed"
+            onClick={handleSyncAll}
+            disabled={isBulkSyncing || isLoadingListings}
+            className={`px-4 py-2 rounded-md ${isBulkSyncing ? 'bg-gray-200 text-gray-500' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}
+            title="Pousser les quantités de tout le filtré vers eBay"
           >
-            Sync tout
+            {isBulkSyncing ? 'Sync…' : 'Sync tout'}
           </button>
         </div>
       )}
@@ -799,7 +1023,7 @@ export default function MarketplacePricing() {
                         Produit/SKU
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Prix interne
+                        Nom produit (app)
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Prix eBay (EUR)
@@ -837,10 +1061,11 @@ export default function MarketplacePricing() {
                             </div>
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-700">
-                            {listing.internal_price != null
-                              ? `${listing.internal_price.toFixed(2)} EUR`
-                              : <span className="text-gray-400">—</span>
-                            }
+                            {listing.product_name ? (
+                              <span>{listing.product_name}</span>
+                            ) : (
+                              <span className="text-gray-400">—</span>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-700">
                             {listing.price != null
