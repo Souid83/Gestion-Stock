@@ -79,7 +79,11 @@ export const handler = async (event: any) => {
     const qs = event.queryStringParameters || {};
     const account_id = qs.account_id;
     const limit = Math.min(parseInt(qs.limit || '50', 10) || 50, 200);
-    const offset = parseInt(qs.offset || '0', 10) || 0;
+    const page = Math.max(parseInt(qs.page || '1', 10) || 1, 1);
+    let offset = parseInt(qs.offset || '0', 10) || 0;
+    if (!qs.offset && qs.page) {
+      offset = (page - 1) * limit;
+    }
     const maxOffersPerSku = parseInt(qs.max_offers_per_sku || '5', 10) || 5;
 
     if (!account_id) return badRequest('missing_account_id');
@@ -170,9 +174,24 @@ export const handler = async (event: any) => {
 
         const items = Array.isArray(json.inventoryItems) ? json.inventoryItems : [];
         const skus = items.map((it: any) => it && (it.sku || it.SKU || it.Sku)).filter(Boolean);
+
+        // Build qty map per SKU
+        const qtyBySku: Record<string, number> = {};
+        for (const it of items) {
+          const sku = it && (it.sku || it.SKU || it.Sku);
+          if (!sku) continue;
+          const qty =
+            (it?.availability?.shipToLocationAvailability?.quantity ?? null) ??
+            (Array.isArray(it?.availability?.pickupAtLocationAvailability)
+              ? it.availability.pickupAtLocationAvailability.reduce((sum: number, loc: any) => sum + (loc?.quantity || 0), 0)
+              : null) ??
+            (it?.availability?.availableQuantity ?? null) ??
+            (it?.availableQuantity ?? null);
+          if (typeof qty === 'number') qtyBySku[sku] = qty;
+        }
         console.info('📦 Inventory SKUs found:', skus.length);
 
-        return { ok: true, skus, total: json.total || skus.length };
+        return { ok: true, skus, total: json.total || skus.length, qtyBySku };
       });
     };
 
@@ -330,6 +349,92 @@ export const handler = async (event: any) => {
     skus = skus.slice(0, MAX_SKUS_PER_RUN);
     console.info('🔎 Processing', skus.length, 'SKUs (max', MAX_SKUS_PER_RUN, ')');
 
+    // Quantities + mappings maps
+    const qtyEbayBySku: Record<string, number> = (inv && (inv as any).qtyBySku) || {};
+    let qtyAppBySku: Record<string, number | null> = {};
+    let productIdBySku: Record<string, string> = {};
+    let internalPriceBySku: Record<string, number | null> = {};
+    try {
+      // Get mappings
+      const { data: mappings } = await supabaseService
+        .from('marketplace_products_map')
+        .select('remote_sku, product_id')
+        .eq('provider', 'ebay')
+        .eq('marketplace_account_id', account_id)
+        .in('remote_sku', skus);
+
+      const productIds = Array.isArray(mappings) ? mappings.map((m: any) => m.product_id).filter(Boolean) : [];
+      if (productIds.length > 0) {
+        // Load shared quantity (view) + fallback quantities and internal price (table)
+        const { data: vw } = await supabaseService
+          .from('products_with_stock')
+          .select('id, shared_quantity')
+          .in('id', productIds);
+
+        const { data: prodRows } = await supabaseService
+          .from('products')
+          .select('id, shared_stock_id, stock_total, stock, retail_price')
+          .in('id', productIds);
+
+        const qtyByProductId: Record<string, number | null> = {};
+        const internalPriceByProductId: Record<string, number | null> = {};
+
+        // Load pool quantities from shared_stocks for products that belong to a shared pool
+        const sharedStockIds = Array.from(new Set((prodRows || []).map((p: any) => p.shared_stock_id).filter(Boolean)));
+        let poolQtyByStockId: Record<string, number | null> = {};
+        if (sharedStockIds.length > 0) {
+          const { data: pools } = await supabaseService
+            .from('shared_stocks')
+            .select('id, quantity')
+            .in('id', sharedStockIds);
+          (pools || []).forEach((s: any) => {
+            if (s && s.id) {
+              poolQtyByStockId[s.id] = typeof s.quantity === 'number' ? s.quantity : (s.quantity ?? null);
+            }
+          });
+        }
+
+        // Build internal price map + quantity fallbacks from products table
+        (prodRows || []).forEach((p: any) => {
+          internalPriceByProductId[p.id] =
+            typeof p.retail_price === 'number' ? p.retail_price : (p.retail_price ?? null);
+
+          // Fallback priority:
+          // 1) shared_stocks.quantity (pool) if shared_stock_id present
+          // 2) shared_quantity from view
+          // 3) products.stock_total
+          // 4) products.stock
+          const poolQty = p.shared_stock_id ? poolQtyByStockId[p.shared_stock_id] : null;
+          const shared = (vw || []).find((s: any) => s.id === p.id)?.shared_quantity;
+          const candidates = [poolQty, shared, p.stock_total, p.stock];
+          const picked = candidates.find((q) => typeof q === 'number');
+          qtyByProductId[p.id] = typeof picked === 'number' ? picked : null;
+        });
+
+        // If view returned a shared_quantity, it takes precedence
+        (vw || []).forEach((s: any) => {
+          if (typeof s.shared_quantity === 'number') {
+            qtyByProductId[s.id] = s.shared_quantity;
+          }
+        });
+
+        const ipBySku: Record<string, number | null> = {};
+        (mappings || []).forEach((m: any) => {
+          if (m?.remote_sku && m?.product_id) {
+            productIdBySku[m.remote_sku] = m.product_id;
+            qtyAppBySku[m.remote_sku] = (qtyByProductId[m.product_id] ?? null);
+            ipBySku[m.remote_sku] = internalPriceByProductId[m.product_id] ?? null;
+          }
+        });
+        internalPriceBySku = ipBySku;
+      }
+      console.info('🧮 Qty maps built — ebay:', Object.keys(qtyEbayBySku).length, 'app:', Object.keys(qtyAppBySku).length);
+      console.info('🔗 mappings found:', Object.keys(productIdBySku).length);
+      console.info('🏷 internal_price set for:', Object.keys(internalPriceBySku).length);
+    } catch (e) {
+      console.warn('⚠️ qty/mapping build failed', (e as any)?.message || e);
+    }
+
     const allOffers = [];
     let skippedCount = 0;
     let totalRetries = 0;
@@ -359,6 +464,13 @@ export const handler = async (event: any) => {
 
     console.info('🧾 Offers collected:', allOffers.length, 'Skipped SKUs:', skippedCount);
 
+    const sampleOffers = allOffers.slice(0, 3).map((o: any) => ({
+      sku: o?.sku || null,
+      price: o?.pricingSummary?.price?.value || null,
+      currency: o?.pricingSummary?.price?.currency || null
+    }));
+    console.info('🔎 Sample offers (sku/price):', sampleOffers);
+
     const defaultCurrency = account.currency || 'EUR';
     const items = allOffers.map((offer) => ({
       provider: 'ebay',
@@ -372,17 +484,30 @@ export const handler = async (event: any) => {
       price_currency: offer && offer.pricingSummary && offer.pricingSummary.price && offer.pricingSummary.price.currency
         ? offer.pricingSummary.price.currency
         : defaultCurrency,
-      status_sync: normalizeListingStatus(offer && offer.listingStatus ? offer.listingStatus : undefined),
-      metadata: { listingStatus: (offer && offer.listingStatus ? offer.listingStatus : null) },
+      status_sync: (offer && offer.sku && productIdBySku[offer.sku]) ? 'ok' : normalizeListingStatus(offer && offer.listingStatus ? offer.listingStatus : undefined),
+      metadata: {
+        listingStatus: (offer && offer.listingStatus ? offer.listingStatus : null),
+        marketplaceId: (offer && offer.marketplaceId ? offer.marketplaceId : null),
+        availableQuantity: (offer && typeof offer.availableQuantity !== 'undefined' ? offer.availableQuantity : null),
+        format: (offer && (offer.format || offer.offerType) ? (offer.format || offer.offerType) : null)
+      },
+      product_id: offer && offer.sku ? (productIdBySku[offer.sku] ?? null) : null,
+      internal_price: offer && offer.sku ? (internalPriceBySku[offer.sku] ?? null) : null,
+      qty_ebay: offer && offer.sku ? (qtyEbayBySku[offer.sku] ?? null) : null,
+      qty_app: offer && offer.sku ? (qtyAppBySku[offer.sku] ?? null) : null,
       updated_at: new Date().toISOString()
     })).filter((it) => it.remote_id);
+
+    // Strip non-persistent fields before DB upsert
+    // Do not persist product_id (only for UI), nor qty_ebay/qty_app
+    const dbItems = items.map(({ qty_ebay, qty_app, product_id, internal_price, ...rest }) => rest);
 
     console.info('💾 Upserting', items.length, 'items');
 
     if (items.length > 0) {
       const { error: upsertError } = await supabaseService
         .from('marketplace_listings')
-        .upsert(items, { onConflict: 'provider,marketplace_account_id,remote_id' });
+        .upsert(dbItems, { onConflict: 'provider,marketplace_account_id,remote_id' });
       if (upsertError) {
         console.error('❌ upsert_failed', upsertError);
         return srvError('upsert_failed', upsertError.message || 'unknown');
@@ -401,7 +526,8 @@ export const handler = async (event: any) => {
         offset,
         processed_skus: skus.length,
         skipped_skus: skippedCount,
-        retries: totalRetries
+        retries: totalRetries,
+        total: (inv && (inv as any).total) || skus.length
       })
     };
   } catch (err: any) {
