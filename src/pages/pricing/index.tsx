@@ -101,6 +101,11 @@ export default function MarketplacePricing() {
   const [diffRows, setDiffRows] = useState<PricingListing[]>([]);
   const [selectedDiff, setSelectedDiff] = useState<Record<string, boolean>>({});
 
+  // Non mappés: sélection et lien en masse par SKU
+  const [showUnmappedModal, setShowUnmappedModal] = useState(false);
+  const [unmappedRows, setUnmappedRows] = useState<PricingListing[]>([]);
+  const [selectedUnmapped, setSelectedUnmapped] = useState<Record<string, boolean>>({});
+
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -822,6 +827,76 @@ export default function MarketplacePricing() {
     setToast({ message: 'Rechargement depuis eBay…', type: 'success' });
   };
 
+  const openUnmappedModal = () => {
+    const rows = listings.filter(l => !l.is_mapped && l.remote_sku);
+    setUnmappedRows(rows);
+    const init: Record<string, boolean> = {};
+    rows.forEach(r => { if (r.remote_sku) init[r.remote_sku] = true; });
+    setSelectedUnmapped(init);
+    setShowUnmappedModal(true);
+  };
+
+  const selectAllUnmapped = () => {
+    const next: Record<string, boolean> = {};
+    unmappedRows.forEach(r => { if (r.remote_sku) next[r.remote_sku] = true; });
+    setSelectedUnmapped(next);
+  };
+
+  const clearAllUnmapped = () => {
+    setSelectedUnmapped({});
+  };
+
+  const linkSelectedUnmappedBySku = async () => {
+    try {
+      const items = Object.keys(selectedUnmapped)
+        .filter(sku => selectedUnmapped[sku])
+        .map(sku => {
+          const row = unmappedRows.find(r => r.remote_sku === sku);
+          return row ? { remote_sku: sku, remote_id: row.remote_id } : null;
+        })
+        .filter(Boolean) as { remote_sku: string; remote_id: string }[];
+
+      if (items.length === 0) {
+        setToast({ message: 'Aucune ligne sélectionnée', type: 'error' });
+        return;
+      }
+
+      const { data: { session } } = await supabase.auth.getSession();
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session?.access_token || ''}`
+      };
+
+      const payload = {
+        action: 'bulk_link_by_sku',
+        provider: selectedProvider,
+        account_id: selectedAccountId,
+        items
+      };
+
+      const resp = await fetch('/.netlify/functions/marketplaces-mapping', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify(payload)
+      });
+
+      const body = await resp.json().catch(() => ({} as any));
+      if (!resp.ok) {
+        throw new Error(body?.error || `HTTP ${resp.status}`);
+      }
+
+      const linked = Number(body?.linked || 0);
+      const review = Array.isArray(body?.needs_review) ? body.needs_review : [];
+      setToast({ message: `Liens par SKU: ${linked} lié(s), ${review.length} à revoir`, type: linked > 0 ? 'success' : 'error' });
+      setShowUnmappedModal(false);
+
+      // Rafraîchir pour récupérer product_id et qty_app
+      setReloadToken(x => x + 1);
+    } catch (e: any) {
+      setToast({ message: `Erreur liaison: ${e.message || e}`, type: 'error' });
+    }
+  };
+
   const openDiffModal = () => {
     const miss = listings.filter(
       l => l.is_mapped && l.qty_app != null && l.remote_sku && l.qty_ebay !== l.qty_app
@@ -1069,6 +1144,14 @@ export default function MarketplacePricing() {
             title="Charger toutes les pages dans la mémoire (pagination client)"
           >
             {isLoadingAll ? 'Chargement…' : 'Charger tout (toutes pages)'}
+          </button>
+          <button
+            onClick={openUnmappedModal}
+            disabled={isLoadingListings || listings.length === 0}
+            className="px-4 py-2 rounded-md bg-amber-600 text-white hover:bg-amber-700"
+            title="Afficher les produits non mappés et lier en masse par SKU"
+          >
+            Non mappés
           </button>
           <button
             onClick={openDiffModal}
@@ -1369,6 +1452,67 @@ export default function MarketplacePricing() {
                 className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700"
               >
                 Envoyer vers eBay ({Object.values(selectedDiff).filter(Boolean).length})
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Non mappés (lien en masse par SKU) */}
+      {showUnmappedModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-3xl shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Produits non mappés</h2>
+              <button onClick={() => setShowUnmappedModal(false)} className="text-gray-500 hover:text-gray-700">✕</button>
+            </div>
+            <div className="flex items-center gap-2 mb-3">
+              <button onClick={selectAllUnmapped} className="px-3 py-1 border rounded">Tout sélectionner</button>
+              <button onClick={clearAllUnmapped} className="px-3 py-1 border rounded">Tout désélectionner</button>
+            </div>
+            <div className="max-h-[60vh] overflow-auto border rounded">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-3 py-2 text-left">SKU</th>
+                    <th className="px-3 py-2 text-left">Nom (app)</th>
+                    <th className="px-3 py-2 text-left">Sélection</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {unmappedRows.map(r => (
+                    <tr key={r.remote_id} className="border-t">
+                      <td className="px-3 py-2 font-mono">{r.remote_sku}</td>
+                      <td className="px-3 py-2">{r.product_name || r.title || '—'}</td>
+                      <td className="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedUnmapped[r.remote_sku]}
+                          onChange={(e) => setSelectedUnmapped(prev => ({ ...prev, [r.remote_sku]: e.target.checked }))}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                  {unmappedRows.length === 0 && (
+                    <tr>
+                      <td colSpan={3} className="px-3 py-4 text-center text-gray-500">Aucun non mappé</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setShowUnmappedModal(false)}
+                className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
+              >
+                Fermer
+              </button>
+              <button
+                onClick={linkSelectedUnmappedBySku}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+              >
+                Lier sélection (SKU)
               </button>
             </div>
           </div>
