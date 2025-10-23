@@ -367,8 +367,8 @@ export const handler = async (event: any) => {
       if (productIds.length > 0) {
         // Load shared quantity (view) + fallback quantities and internal price (table)
         const { data: vw } = await supabaseService
-          .from('products_with_stock')
-          .select('id, shared_quantity')
+          .from('clear_products_with_stock')
+          .select('id, mirror_stock')
           .in('id', productIds);
 
         const { data: prodRows } = await supabaseService
@@ -385,8 +385,8 @@ export const handler = async (event: any) => {
         const parentIds = Array.from(new Set((allProdRows || []).map((p: any) => p.mirror_of).filter(Boolean)));
         if (parentIds.length > 0) {
           const { data: vwParents } = await supabaseService
-            .from('products_with_stock')
-            .select('id, shared_quantity')
+            .from('clear_products_with_stock')
+            .select('id, mirror_stock')
             .in('id', parentIds);
           const { data: parentRows } = await supabaseService
             .from('products')
@@ -422,16 +422,16 @@ export const handler = async (event: any) => {
           // 3) products.stock_total
           // 4) products.stock
           const poolQty = p.shared_stock_id ? poolQtyByStockId[p.shared_stock_id] : null;
-          const shared = (allVw || []).find((s: any) => s.id === p.id)?.shared_quantity;
-          const candidates = [poolQty, shared, p.stock_total, p.stock];
+          const mirrorVal = (allVw || []).find((s: any) => s.id === p.id)?.mirror_stock;
+          const candidates = [poolQty, mirrorVal, p.stock_total, p.stock];
           const picked = candidates.find((q) => typeof q === 'number');
           qtyByProductId[p.id] = typeof picked === 'number' ? picked : null;
         });
 
-        // If view returned a shared_quantity, it takes precedence
+        // If view returned a mirror_stock, it takes precedence
         (allVw || []).forEach((s: any) => {
-          if (typeof s.shared_quantity === 'number') {
-            qtyByProductId[s.id] = s.shared_quantity;
+          if (typeof s.mirror_stock === 'number') {
+            qtyByProductId[s.id] = s.mirror_stock;
           }
         });
 
