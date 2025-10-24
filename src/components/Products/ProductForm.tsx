@@ -8,7 +8,21 @@ import { supabase } from '../../lib/supabase';
 import { ImportDialog } from '../ImportProgress/ImportDialog';
 import { useCSVImport } from '../../hooks/useCSVImport';
 import { Toast } from '../Notifications/Toast';
-import { syncEbayForProductsFromEbayStock } from '../../services/stock';
+
+async function pushEbayFromEbayStock(parentIds: string[]) {
+  try {
+    const mod = await import('../../services/stock');
+    const fn = (mod as any).syncEbayForProductsFromEbayStock;
+    if (typeof fn === 'function') {
+      return await fn(parentIds, { ebayStockIds: ['adf77dc9-8594-45a2-9d2e-501d62f6fb7f'] });
+    }
+    console.warn('syncEbayForProductsFromEbayStock not available in this build; skipping push.');
+    return { success: false, pushed: 0, error: 'not_available' };
+  } catch (e) {
+    console.warn('pushEbayFromEbayStock dynamic import failed', e);
+    return { success: false, pushed: 0, error: 'import_failed' };
+  }
+}
 
 interface Stock {
   id: string;
@@ -1552,9 +1566,7 @@ export const ProductForm: React.FC<ProductFormProps> = ({
           const parents = Array.from(affectedParents);
           if (parents.length > 0) {
             setToast({ message: 'Poussée eBay (stock EBAY) en cours…', type: 'success' });
-            const res = await syncEbayForProductsFromEbayStock(parents, {
-              ebayStockIds: ['adf77dc9-8594-45a2-9d2e-501d62f6fb7f'] // EBAY
-            });
+            const res = await pushEbayFromEbayStock(parents);
             setToast({
               message: res.success
                 ? `eBay: ${res.pushed} SKU(s) mis à jour depuis le stock EBAY`
