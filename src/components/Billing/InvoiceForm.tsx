@@ -80,6 +80,11 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
   const [selectedProductForNewItem, setSelectedProductForNewItem] = useState<ProductWithStock | null>(null);
   const [viewAfterSave, setViewAfterSave] = useState<boolean>(false);
 
+  // Serial (IMEI) selection for PAM parents under VAT regime
+  const [serialOptions, setSerialOptions] = useState<ProductWithStock[]>([]);
+  const [showSerialModal, setShowSerialModal] = useState(false);
+  const [serialLoadError, setSerialLoadError] = useState<string | null>(null);
+
   // Quick customer creation
   const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
   const [newCustomer, setNewCustomer] = useState<any>({
@@ -238,6 +243,41 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
     const list = filteredProducts.filter((p: any) => (p as any).vat_type === docVatRegime);
     setShowProductDropdown(productSearchTerm.trim() !== '' && list.length > 0);
   }, [productSearchTerm, filteredProducts, docVatRegime]);
+
+  // Recompute price when type client / regime changes, based on the selected product
+  useEffect(() => {
+    if (!selectedProductForNewItem) return;
+
+    // If selected product has a VAT type that no longer matches the document, reset selection
+    const selVat = (selectedProductForNewItem as any).vat_type;
+    if (selVat && selVat !== docVatRegime) {
+      setSelectedProductForNewItem(null);
+      setNewItem(prev => ({
+        ...prev,
+        product_id: '',
+        description: '',
+        unit_price: 0,
+        total_price: 0,
+        tax_rate: docVatRegime === 'margin' ? 0 : 20
+      }));
+      return;
+    }
+
+    const base =
+      docCustomerType === 'pro'
+        ? Number((selectedProductForNewItem as any).pro_price || 0)
+        : Number(selectedProductForNewItem.retail_price || 0);
+    const taxRate = docVatRegime === 'margin' ? 0 : 20;
+    setNewItem(prev => {
+      const qty = prev.quantity || 1;
+      return {
+        ...prev,
+        unit_price: base,
+        tax_rate: taxRate,
+        total_price: base * qty
+      };
+    });
+  }, [docCustomerType, docVatRegime, selectedProductForNewItem]);
   
   // Calculate totals when items change
   useEffect(() => {
@@ -309,26 +349,86 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
   };
   
   // Handle product selection
-  const handleProductSelect = (product: ProductWithStock) => {
+  const handleProductSelect = async (product: ProductWithStock) => {
     console.log('Product selected:', product);
 
-    // Règles prix selon type client et régime TVA du document
-    const isMargin = docVatRegime === 'margin';
+    // If parent PAM, under selected VAT regime we need to propose serials (IMEI)
+    if ((product as any).product_type === 'PAM') {
+      try {
+        setSerialLoadError(null);
+        // Load serialized children matching the selected VAT regime
+        const { data, error } = await (supabase as any)
+          .from('products' as any)
+          .select('id,name,sku,serial_number,retail_price,pro_price,purchase_price_with_fees,vat_type' as any)
+          .eq('parent_id' as any, (product as any).id as any)
+          .not('serial_number' as any, 'is' as any, null as any)
+          .eq('vat_type' as any, docVatRegime as any);
+
+        if (error) {
+          console.warn('IMEI fetch failed:', error);
+          setSerialLoadError('Impossible de charger les IMEI disponibles.');
+          return;
+        }
+
+        const options = Array.isArray(data) ? (data as ProductWithStock[]) : [];
+        if (options.length === 0) {
+          setSerialOptions([]);
+          setShowSerialModal(false);
+          setSerialLoadError(`Aucun IMEI en ${docVatRegime === 'margin' ? 'marge' : 'TVA normale'} disponible`);
+          return;
+        }
+
+        if (options.length === 1) {
+          // Directly apply this serialized child
+          const child = options[0] as any as ProductWithStock;
+          setSelectedProductForNewItem(child);
+          const base =
+            docCustomerType === 'pro'
+              ? Number((child as any).pro_price || 0)
+              : Number((child as any).retail_price || 0);
+          const taxRate = docVatRegime === 'margin' ? 0 : 20;
+          setNewItem({
+            product_id: child.id,
+            description: child.name,
+            quantity: 1,
+            unit_price: base,
+            tax_rate: taxRate,
+            total_price: base
+          });
+          setProductSearchTerm('');
+          setShowProductDropdown(false);
+          return;
+        }
+
+        // Multiple IMEI: open modal to select one
+        setSerialOptions(options);
+        setShowSerialModal(true);
+        // Keep the parent reference in selection context to compute margin preview,
+        // but selection will be finalized when user picks an IMEI.
+        setSelectedProductForNewItem(null);
+        return;
+      } catch (e) {
+        console.error('IMEI pipeline error:', e);
+        setSerialLoadError('Erreur inattendue lors du chargement des IMEI.');
+        return;
+      }
+    }
+
+    // Regular (PAU or already serialized product)
     const base =
       docCustomerType === 'pro'
         ? Number((product as any).pro_price || 0)
         : Number(product.retail_price || 0);
-    const unit = base;
-    const taxRate = isMargin ? 0 : 20;
+    const taxRate = docVatRegime === 'margin' ? 0 : 20;
 
     setSelectedProductForNewItem(product);
     setNewItem({
       product_id: product.id,
       description: product.name,
       quantity: 1,
-      unit_price: unit,
+      unit_price: base,
       tax_rate: taxRate,
-      total_price: unit
+      total_price: base
     });
 
     setProductSearchTerm('');
@@ -1277,6 +1377,9 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                     </ul>
                   </div>
                 )}
+                {serialLoadError && (
+                  <div className="mt-2 text-sm text-red-600">{serialLoadError}</div>
+                )}
               </div>
               
               {/* Description */}
@@ -1341,20 +1444,33 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                 />
                 {/* Marge live */}
                 {selectedProductForNewItem && (
-                  <div className="mt-1 text-xs text-gray-600">
+                  <div className="mt-2">
                     {(() => {
                       const achat = Number((selectedProductForNewItem as any).purchase_price_with_fees || 0);
                       const pu = Number(newItem.unit_price || 0);
                       if (achat > 0 && pu > 0) {
                         const margeEuro = docVatRegime === 'margin' ? (pu - achat) / 1.2 : (pu - achat);
                         const margePct = achat > 0 ? (margeEuro / achat) * 100 : 0;
+
+                        // Color rules copied from ProductList
+                        let color = 'text-gray-600';
+                        if (docCustomerType === 'pro') {
+                          if (margePct < 8) color = 'text-red-600';
+                          else if (margePct <= 18) color = 'text-yellow-500';
+                          else color = 'text-green-600';
+                        } else {
+                          if (margePct < 20) color = 'text-red-600';
+                          else if (margePct <= 25) color = 'text-yellow-500';
+                          else color = 'text-green-600';
+                        }
+
                         return (
-                          <span>
-                            Marge: {margePct.toFixed(1)}% ({formatCurrency(margeEuro)})
+                          <span className={`text-xl font-bold ${color}`}>
+                            Marge: {isFinite(margePct) ? margePct.toFixed(1) : '0.0'}% ({formatCurrency(margeEuro)})
                           </span>
                         );
                       }
-                      return <span>Marge: —</span>;
+                      return <span className="text-xl font-bold text-gray-600">Marge: —</span>;
                     })()}
                   </div>
                 )}
@@ -1531,6 +1647,97 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
           </div>
         </div>
       </form>
+
+      {/* Serial (IMEI) selection modal for PAM under VAT regime */}
+      {showSerialModal && (
+        <div className="fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center">
+          <div className="bg-white rounded-lg shadow-lg w-full max-w-2xl max-h-[80vh] overflow-hidden">
+            <div className="px-4 py-3 border-b flex items-center justify-between">
+              <h3 className="text-lg font-semibold">
+                Sélectionner un IMEI ({docVatRegime === 'margin' ? 'marge' : 'TVA normale'})
+              </h3>
+              <button
+                type="button"
+                className="text-gray-600 hover:text-gray-800"
+                onClick={() => { setShowSerialModal(false); }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-4 overflow-auto" style={{ maxHeight: '60vh' }}>
+              {serialOptions.length === 0 ? (
+                <div className="text-red-600">
+                  Aucun IMEI en {docVatRegime === 'margin' ? 'marge' : 'TVA normale'} disponible
+                </div>
+              ) : (
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">IMEI</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">SKU</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Prix (Pro/Part)</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Achat</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {serialOptions.map((child: any) => {
+                      const pricePro = Number(child.pro_price || 0);
+                      const pricePart = Number(child.retail_price || 0);
+                      const achat = Number(child.purchase_price_with_fees || 0);
+                      return (
+                        <tr key={child.id}>
+                          <td className="px-4 py-2 text-sm">{child.serial_number || '-'}</td>
+                          <td className="px-4 py-2 text-sm">{child.sku}</td>
+                          <td className="px-4 py-2 text-sm">
+                            <div className="text-gray-700">
+                              Pro: {formatCurrency(pricePro)} • Particulier: {formatCurrency(pricePart)}
+                            </div>
+                          </td>
+                          <td className="px-4 py-2 text-sm">{formatCurrency(achat)}</td>
+                          <td className="px-4 py-2 text-right">
+                            <button
+                              type="button"
+                              className="px-3 py-1 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm"
+                              onClick={() => {
+                                const base = docCustomerType === 'pro' ? pricePro : pricePart;
+                                const taxRate = docVatRegime === 'margin' ? 0 : 20;
+                                setSelectedProductForNewItem(child as any);
+                                setNewItem({
+                                  product_id: child.id,
+                                  description: child.name,
+                                  quantity: 1,
+                                  unit_price: base,
+                                  tax_rate: taxRate,
+                                  total_price: base
+                                });
+                                setShowSerialModal(false);
+                                setProductSearchTerm('');
+                                setShowProductDropdown(false);
+                              }}
+                            >
+                              Utiliser
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            <div className="px-4 py-3 border-t flex justify-end">
+              <button
+                type="button"
+                className="px-4 py-2 rounded-md border border-gray-300 hover:bg-gray-50"
+                onClick={() => setShowSerialModal(false)}
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
