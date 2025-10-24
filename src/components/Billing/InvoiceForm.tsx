@@ -28,6 +28,7 @@ import { ProductWithStock } from '../../types/supabase';
 import { supabase } from '../../lib/supabase';
 import { CSVImportArticles } from './CSVImportArticles';
 import { ProductSearch } from '../Search/ProductSearch';
+import { searchProductsLikeList } from '../../utils/searchProductsLikeList';
 
 interface InvoiceFormProps {
   invoiceId?: string;
@@ -202,20 +203,29 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
     }
   };
   
-  // Filter products when search term changes
+  // Filter products when search term changes (reuse the same engine as product listing)
   useEffect(() => {
-    if (productSearchTerm.trim() === '') {
-      setFilteredProducts([]);
-    } else {
-      const lowercasedSearch = productSearchTerm.toLowerCase();
-      setFilteredProducts(
-        products.filter(product => 
-          product.name.toLowerCase().includes(lowercasedSearch) ||
-          product.sku.toLowerCase().includes(lowercasedSearch)
-        ).slice(0, 10) // Limit to 10 results
-      );
-    }
-  }, [productSearchTerm, products]);
+    let cancelled = false;
+
+    const run = async () => {
+      const q = productSearchTerm.trim();
+      if (q === '') {
+        setFilteredProducts([]);
+        return;
+      }
+      try {
+        const res = await searchProductsLikeList(q, 20);
+        if (!cancelled) {
+          setFilteredProducts(res as any);
+        }
+      } catch {
+        if (!cancelled) setFilteredProducts([]);
+      }
+    };
+
+    run();
+    return () => { cancelled = true; };
+  }, [productSearchTerm]);
 
   // Toggle dropdown visibility in sync with search results
   useEffect(() => {
@@ -291,14 +301,23 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
   // Handle product selection
   const handleProductSelect = (product: ProductWithStock) => {
     console.log('Product selected:', product);
+
+    // Pricing rules:
+    // - TVA normale: retail_price est HT en base => on prend HT et on applique le taux (champ tax_rate de la ligne)
+    // - TVA sur marge: retail_price est TVM (prix final) => pas de double TVA sur la ligne: tax_rate=0, unit_price=TVM
+    const isMargin = (product as any).vat_type === 'margin';
+    const unitHTOrTVM = Number(product.retail_price || 0);
+    const taxRate = isMargin ? 0 : 20;
+
     setNewItem({
       product_id: product.id,
       description: product.name,
       quantity: 1,
-      unit_price: product.retail_price || 0,
-      tax_rate: 20,
-      total_price: product.retail_price || 0
+      unit_price: unitHTOrTVM,
+      tax_rate: taxRate,
+      total_price: unitHTOrTVM
     });
+
     setProductSearchTerm('');
     setShowProductDropdown(false);
   };
