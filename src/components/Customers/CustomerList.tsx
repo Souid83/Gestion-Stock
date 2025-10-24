@@ -2,10 +2,16 @@ import React, { useEffect, useState } from 'react';
 import { useCustomerStore } from '../../store/customerStore';
 import { Eye, Edit, Trash2, Plus, Search, RefreshCw, MapPin, Phone, Mail } from 'lucide-react';
 
-export const CustomerList: React.FC = () => {
+interface CustomerListProps {
+  onNew?: () => void;
+  onEdit?: (id: string) => void;
+  onView?: (id: string) => void;
+}
+
+export const CustomerList: React.FC<CustomerListProps> = ({ onNew, onEdit, onView }) => {
   const { customers, isLoading, error, fetchCustomers, deleteCustomer } = useCustomerStore();
   const [searchTerm, setSearchTerm] = useState('');
-  const [filteredCustomers, setFilteredCustomers] = useState(customers);
+  const [filteredCustomers, setFilteredCustomers] = useState<any[]>(customers as any[]);
   const [groupFilter, setGroupFilter] = useState<'all' | 'pro' | 'particulier'>('all');
   const [zoneFilter, setZoneFilter] = useState<string>('');
   const [uniqueZones, setUniqueZones] = useState<string[]>([]);
@@ -17,10 +23,10 @@ export const CustomerList: React.FC = () => {
 
   useEffect(() => {
     // Extract unique zones from customers
-    const zones = customers
-      .map(customer => customer.zone)
-      .filter((zone): zone is string => !!zone)
-      .filter((zone, index, self) => self.indexOf(zone) === index)
+    const zones = (customers as any[])
+      .map((customer: any) => customer.zone)
+      .filter((zone: any): zone is string => !!zone)
+      .filter((zone: string, index: number, self: string[]) => self.indexOf(zone) === index)
       .sort();
     
     setUniqueZones(zones);
@@ -28,25 +34,25 @@ export const CustomerList: React.FC = () => {
 
   useEffect(() => {
     // Apply filters
-    let filtered = [...customers];
+    let filtered: any[] = [...(customers as any[])];
     
     // Apply group filter
     if (groupFilter !== 'all') {
-      filtered = filtered.filter(customer => customer.customer_group === groupFilter);
+      filtered = filtered.filter((customer: any) => customer.customer_group === groupFilter);
     }
     
     // Apply zone filter
     if (zoneFilter) {
-      filtered = filtered.filter(customer => customer.zone === zoneFilter);
+      filtered = filtered.filter((customer: any) => customer.zone === zoneFilter);
     }
     
     // Apply search term
     if (searchTerm.trim()) {
       const lowercasedSearch = searchTerm.toLowerCase();
-      filtered = filtered.filter(customer => 
-        customer.name.toLowerCase().includes(lowercasedSearch) ||
-        (customer.email && customer.email.toLowerCase().includes(lowercasedSearch)) ||
-        (customer.phone && customer.phone.toLowerCase().includes(lowercasedSearch))
+      filtered = filtered.filter((customer: any) => 
+        (customer.name || '').toLowerCase().includes(lowercasedSearch) ||
+        (customer.email && (customer.email as string).toLowerCase().includes(lowercasedSearch)) ||
+        (customer.phone && (customer.phone as string).toLowerCase().includes(lowercasedSearch))
       );
     }
     
@@ -60,13 +66,15 @@ export const CustomerList: React.FC = () => {
   };
 
   const handleEditCustomer = (id: string) => {
-    // Store the ID in session storage and navigate to the edit page
+    if (onEdit) return onEdit(id);
+    // Fallback legacy navigation
     sessionStorage.setItem('editCustomerId', id);
     window.location.href = '/customers/edit';
   };
 
   const handleViewCustomer = (id: string) => {
-    // Store the ID in session storage and navigate to the view page
+    if (onView) return onView(id);
+    // Fallback legacy navigation
     sessionStorage.setItem('viewCustomerId', id);
     window.location.href = '/customers/view';
   };
@@ -94,7 +102,7 @@ export const CustomerList: React.FC = () => {
             <RefreshCw size={18} />
           </button>
           <button
-            onClick={() => window.location.href = '/customers/new'}
+            onClick={() => (onNew ? onNew() : (window.location.href = '/customers/new'))}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
           >
             <Plus size={18} />
@@ -130,7 +138,27 @@ export const CustomerList: React.FC = () => {
             className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
           >
             <option value="">Toutes les zones</option>
-            {uniqueZones.map(zone => (
+            {[...new Set([
+              'Auvergne-Rhône-Alpes',
+              'Bourgogne-Franche-Comté',
+              'Bretagne',
+              'Centre-Val de Loire',
+              'Corse',
+              'Grand Est',
+              'Hauts-de-France',
+              'Île-de-France',
+              'Normandie',
+              'Nouvelle-Aquitaine',
+              'Occitanie',
+              'Pays de la Loire',
+              "Provence-Alpes-Côte d'Azur",
+              'Guadeloupe',
+              'Martinique',
+              'Guyane',
+              'La Réunion',
+              'Mayotte',
+              ...uniqueZones
+            ])].map((zone) => (
               <option key={zone} value={zone}>{zone}</option>
             ))}
           </select>
@@ -224,12 +252,12 @@ export const CustomerList: React.FC = () => {
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                         <div className="flex flex-col">
                           <div>
-                            Facturation: {customer.addresses?.some(a => a.address_type === 'billing') ? 
+                            Facturation: {customer.addresses?.some((a: any) => a.address_type === 'billing') ? 
                               <span className="text-green-600">Oui</span> : 
                               <span className="text-red-600">Non</span>}
                           </div>
                           <div>
-                            Livraison: {customer.addresses?.some(a => a.address_type === 'shipping') ? 
+                            Livraison: {customer.addresses?.some((a: any) => a.address_type === 'shipping') ? 
                               <span className="text-green-600">Oui</span> : 
                               <span className="text-red-600">Non</span>}
                           </div>
@@ -250,6 +278,13 @@ export const CustomerList: React.FC = () => {
                             title="Modifier"
                           >
                             <Edit size={18} />
+                          </button>
+                          <button
+                            onClick={() => alert("Envoi d'email bientôt disponible")}
+                            className="text-gray-600 hover:text-gray-900"
+                            title="Envoi d'email bientôt disponible"
+                          >
+                            <Mail size={18} />
                           </button>
                           <button
                             onClick={() => handleDelete(customer.id)}
@@ -289,7 +324,7 @@ export const CustomerList: React.FC = () => {
               </p>
               <div className="mt-6">
                 <button
-                  onClick={() => window.location.href = '/customers/new'}
+                  onClick={() => (onNew ? onNew() : (window.location.href = '/customers/new'))}
                   className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                 >
                   <Plus className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />

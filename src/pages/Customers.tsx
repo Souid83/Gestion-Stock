@@ -52,7 +52,19 @@ export const Customers: React.FC = () => {
         );
       case 'list':
       default:
-        return <CustomerList />;
+        return (
+          <CustomerList
+            onNew={() => setView('new')}
+            onEdit={(id: string) => {
+              setSelectedCustomerId(id);
+              setView('edit');
+            }}
+            onView={(id: string) => {
+              setSelectedCustomerId(id);
+              setView('view');
+            }}
+          />
+        );
     }
   };
 

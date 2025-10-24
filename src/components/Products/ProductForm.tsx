@@ -8,6 +8,7 @@ import { supabase } from '../../lib/supabase';
 import { ImportDialog } from '../ImportProgress/ImportDialog';
 import { useCSVImport } from '../../hooks/useCSVImport';
 import { Toast } from '../Notifications/Toast';
+import { syncEbayForProductsFromEbayStock } from '../../services/stock';
 
 interface Stock {
   id: string;
@@ -141,6 +142,7 @@ export const ProductForm: React.FC<ProductFormProps> = ({
   const [nameTouched, setNameTouched] = useState(false);
   const [stocks, setStocks] = useState<Stock[]>([]);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [pushToEbayAfterImport, setPushToEbayAfterImport] = useState(true);
 
   useEffect(() => {
     fetchCategories();
@@ -1044,6 +1046,7 @@ export const ProductForm: React.FC<ProductFormProps> = ({
       startImport(products.length);
       setError(null);
       const importErrors: { line: number; message: string }[] = [];
+      const affectedParents = new Set<string>();
       let createdCount = 0;
       let updatedCount = 0;
       // Choix du mode d'import: OK = Additionner, Annuler = Écraser
@@ -1400,6 +1403,7 @@ export const ProductForm: React.FC<ProductFormProps> = ({
             updatedCount += 1;
             didChange = true;
             productId = existingProductAny.id;
+            affectedParents.add(productId as string);
             console.log(`Produit existant mis à jour: ${productId}`);
           } else {
             const newProduct = await addProduct(productData);
@@ -1407,6 +1411,7 @@ export const ProductForm: React.FC<ProductFormProps> = ({
             if (productId) {
               createdCount += 1;
               didChange = true;
+              affectedParents.add(productId as string);
             }
             console.log(`Nouveau produit créé: ${productId}`);
           }
@@ -1540,6 +1545,27 @@ export const ProductForm: React.FC<ProductFormProps> = ({
       // Fin d'import PAU: s'assurer que le modal n'est pas affiché
       isCSVImporting.current = false;
       setIsStockModalOpen(false);
+
+      // Post-import: pousser la quantité EBAY uniquement (parentOnly) vers eBay si demandé
+      if (pushToEbayAfterImport) {
+        try {
+          const parents = Array.from(affectedParents);
+          if (parents.length > 0) {
+            setToast({ message: 'Poussée eBay (stock EBAY) en cours…', type: 'success' });
+            const res = await syncEbayForProductsFromEbayStock(parents, {
+              ebayStockIds: ['adf77dc9-8594-45a2-9d2e-501d62f6fb7f'] // EBAY
+            });
+            setToast({
+              message: res.success
+                ? `eBay: ${res.pushed} SKU(s) mis à jour depuis le stock EBAY`
+                : `Erreur eBay: ${res.error || 'inconnue'}`,
+              type: res.success ? 'success' : 'error'
+            });
+          }
+        } catch (e: any) {
+          setToast({ message: `Erreur push eBay: ${e?.message || e}`, type: 'error' });
+        }
+      }
     } catch (error) {
       console.error('Error importing CSV:', error);
       setImportError([{
@@ -1980,6 +2006,16 @@ export const ProductForm: React.FC<ProductFormProps> = ({
                 className="hidden"
                 ref={fileInputRef}
               />
+            </label>
+            <label className="flex items-center gap-2 ml-2">
+              <input
+                type="checkbox"
+                checked={pushToEbayAfterImport}
+                onChange={(e) => setPushToEbayAfterImport(e.target.checked)}
+                className="form-checkbox h-5 w-5 text-blue-600"
+                title="Pousser les quantités eBay après l'import"
+              />
+              <span className="text-blue-800 text-sm">Pousser sur eBay après import</span>
             </label>
           </div>
         </div>

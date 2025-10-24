@@ -27,6 +27,7 @@ import {
 import { ProductWithStock } from '../../types/supabase';
 import { supabase } from '../../lib/supabase';
 import { CSVImportArticles } from './CSVImportArticles';
+import { ProductSearch } from '../Search/ProductSearch';
 
 interface InvoiceFormProps {
   invoiceId?: string;
@@ -34,7 +35,7 @@ interface InvoiceFormProps {
 }
 
 export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) => {
-  const { customers, fetchCustomers } = useCustomerStore();
+  const { customers, fetchCustomers, addCustomer, addAddress } = useCustomerStore();
   const { products, fetchProducts } = useProductStore();
   
   // Form state
@@ -57,7 +58,7 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
   const [items, setItems] = useState<Partial<InvoiceItemInsert>[]>([]);
   
   // UI state
-  const [selectedCustomer, setSelectedCustomer] = useState<CustomerWithAddresses | null>(null);
+  const [selectedCustomer, setSelectedCustomer] = useState<any>(null);
   const [customerSearchTerm, setCustomerSearchTerm] = useState('');
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
   const [productSearchTerm, setProductSearchTerm] = useState('');
@@ -70,6 +71,18 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
     unit_price: 0,
     tax_rate: 20,
     total_price: 0
+  });
+
+  // Quick customer creation
+  const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
+  const [newCustomer, setNewCustomer] = useState<any>({
+    name: '',
+    email: '',
+    phone: '',
+    customer_group: 'particulier',
+    billing: { line1: '', line2: '', zip: '', city: '', country: 'FR' },
+    shippingSameAsBilling: true,
+    shipping: { line1: '', line2: '', zip: '', city: '', country: 'FR' }
   });
   
   // Loading state
@@ -134,14 +147,14 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
     setError(null);
     try {
       console.log(`Fetching invoice with ID: ${id}`);
-      const { data, error } = await supabase
-        .from('invoices')
+      const { data, error } = await (supabase as any)
+        .from('invoices' as any)
         .select(`
           *,
           customer:customers(*),
           items:invoice_items(*, product:products(id, name, sku, retail_price, pro_price))
-        `)
-        .eq('id', id)
+        ` as any)
+        .eq('id' as any, id as any)
         .single();
 
       if (error) throw error;
@@ -149,27 +162,29 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
       console.log('Invoice data fetched:', data);
       
       // Set form data
+      const row: any = data as any;
       setFormData({
-        customer_id: data.customer_id,
-        status: data.status,
-        date_issued: data.date_issued,
-        date_due: data.date_due,
-        note: data.note || '',
-        billing_address_json: data.billing_address_json,
-        shipping_address_json: data.shipping_address_json,
-        amount_paid: data.amount_paid || 0,
-        document_type_id: data.document_type_id || ''
+        customer_id: row.customer_id,
+        status: row.status,
+        date_issued: row.date_issued,
+        date_due: row.date_due,
+        note: row.note || '',
+        billing_address_json: row.billing_address_json,
+        shipping_address_json: row.shipping_address_json,
+        amount_paid: row.amount_paid || 0,
+        document_type_id: row.document_type_id || ''
       });
       
       // Find and set the selected customer
-      const customer = customers.find(c => c.id === data.customer_id);
+      const customer: any = (customers as any[]).find((c: any) => c.id === row.customer_id);
       if (customer) {
         setSelectedCustomer(customer);
       }
       
       // Set items
-      if (data.items) {
-        setItems(data.items.map(item => ({
+      const itemsArr: any[] = Array.isArray(row.items) ? (row.items as any[]) : [];
+      if (itemsArr.length > 0) {
+        setItems(itemsArr.map((item: any) => ({
           id: item.id,
           product_id: item.product_id,
           description: item.description,
@@ -201,6 +216,11 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
       );
     }
   }, [productSearchTerm, products]);
+
+  // Toggle dropdown visibility in sync with search results
+  useEffect(() => {
+    setShowProductDropdown(productSearchTerm.trim() !== '' && filteredProducts.length > 0);
+  }, [productSearchTerm, filteredProducts]);
   
   // Calculate totals when items change
   useEffect(() => {
@@ -241,8 +261,8 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
     
     // Set default addresses if available
     if (customer.addresses && customer.addresses.length > 0) {
-      const billingAddress = customer.addresses.find(addr => addr.address_type === 'billing' && addr.is_default);
-      const shippingAddress = customer.addresses.find(addr => addr.address_type === 'shipping' && addr.is_default);
+      const billingAddress = (customer.addresses || []).find((addr: any) => addr.address_type === 'billing' && addr.is_default);
+      const shippingAddress = (customer.addresses || []).find((addr: any) => addr.address_type === 'shipping' && addr.is_default);
       
       if (billingAddress) {
         const addressJson: Address = {
@@ -281,6 +301,78 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
     });
     setProductSearchTerm('');
     setShowProductDropdown(false);
+  };
+
+  // Create customer quickly and bind to form
+  const createAndSelectCustomer = async (): Promise<boolean> => {
+    try {
+      const name = (newCustomer?.name || '').trim();
+      const email = (newCustomer?.email || '').trim();
+      const phone = (newCustomer?.phone || '').trim();
+      if (!name) {
+        alert('Nom du client requis pour créer un client.');
+        return false;
+      }
+      const baseCustomer: any = {
+        name,
+        email: email || null,
+        phone: phone || null,
+        customer_group: (newCustomer?.customer_group || 'particulier').toLowerCase() === 'pro' ? 'pro' : 'particulier'
+      };
+      const created = await addCustomer(baseCustomer);
+      if (!created || !(created as any).id) {
+        alert('Création du client échouée.');
+        return false;
+      }
+      const cid = (created as any).id as string;
+
+      // Billing address
+      const b = newCustomer?.billing || {};
+      if (b.line1 && b.zip && b.city) {
+        await addAddress({
+          customer_id: cid,
+          address_type: 'billing',
+          line1: b.line1,
+          line2: b.line2 || null,
+          zip: b.zip,
+          city: b.city,
+          country: b.country || 'FR',
+          is_default: true
+        } as any);
+      }
+
+      // Shipping address (same as billing by default)
+      const useBilling = !!newCustomer?.shippingSameAsBilling;
+      const s = useBilling ? b : (newCustomer?.shipping || {});
+      if (s.line1 && s.zip && s.city) {
+        await addAddress({
+          customer_id: cid,
+          address_type: 'shipping',
+          line1: s.line1,
+          line2: s.line2 || null,
+          zip: s.zip,
+          city: s.city,
+          country: s.country || 'FR',
+          is_default: true
+        } as any);
+      }
+
+      setFormData(prev => ({ ...prev, customer_id: cid }));
+      setSelectedCustomer({
+        id: cid,
+        name,
+        email,
+        phone,
+        customer_group: baseCustomer.customer_group,
+        addresses: []
+      } as any);
+      setShowNewCustomerForm(false);
+      return true;
+    } catch (e) {
+      console.error('createAndSelectCustomer failed:', e);
+      alert('Création du client échouée (voir console).');
+      return false;
+    }
   };
   
   // Handle adding a new item
@@ -354,8 +446,14 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
     console.log('Submitting form with data:', formData);
 
     if (!formData.customer_id) {
-      alert('Veuillez sélectionner un client');
-      return;
+      // Try to create a customer on the fly if quick form has a name
+      if ((newCustomer?.name || '').trim().length > 0) {
+        const ok = await createAndSelectCustomer();
+        if (!ok) return;
+      } else {
+        alert('Veuillez sélectionner un client ou créer un client.');
+        return;
+      }
     }
 
     if (!formData.document_type_id) {
@@ -375,22 +473,22 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
       if (invoiceId) {
         // Update existing invoice
         console.log('Updating invoice with ID:', invoiceId);
-        const { error: updateError } = await supabase
-          .from('invoices')
+        const { error: updateError } = await (supabase as any)
+          .from('invoices' as any)
           .update({
-            customer_id: formData.customer_id,
-            status: formData.status,
-            date_issued: formData.date_issued,
-            date_due: formData.date_due,
-            note: formData.note,
-            billing_address_json: formData.billing_address_json,
-            shipping_address_json: formData.shipping_address_json,
+            customer_id: (formData as any).customer_id,
+            status: (formData as any).status,
+            date_issued: (formData as any).date_issued,
+            date_due: (formData as any).date_due,
+            note: (formData as any).note,
+            billing_address_json: (formData as any).billing_address_json,
+            shipping_address_json: (formData as any).shipping_address_json,
             total_ht: totals.totalHT,
             total_ttc: totals.totalTTC,
             tva: totals.totalTVA,
-            document_type_id: formData.document_type_id
-          })
-          .eq('id', invoiceId);
+            document_type_id: (formData as any).document_type_id
+          } as any)
+          .eq('id' as any, invoiceId as any);
 
         if (updateError) throw updateError;
 
@@ -398,19 +496,19 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
         
         // Handle items - this is more complex as we need to add/update/delete
         // First, get existing items
-        const { data: existingItems, error: itemsError } = await supabase
-          .from('invoice_items')
-          .select('id')
-          .eq('invoice_id', invoiceId);
+        const { data: existingItems, error: itemsError } = await (supabase as any)
+          .from('invoice_items' as any)
+          .select('id' as any)
+          .eq('invoice_id' as any, invoiceId as any);
           
         if (itemsError) throw itemsError;
         
         // Items to add (those without an id)
         const itemsToAdd = items.filter(item => !item.id);
         if (itemsToAdd.length > 0) {
-          const { error: addError } = await supabase
-            .from('invoice_items')
-            .insert(itemsToAdd.map(item => ({
+          const { error: addError } = await (supabase as any)
+            .from('invoice_items' as any)
+            .insert(itemsToAdd.map((item: any) => ({
               invoice_id: invoiceId,
               product_id: item.product_id,
               description: item.description,
@@ -418,38 +516,38 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
               unit_price: item.unit_price,
               tax_rate: item.tax_rate,
               total_price: item.total_price
-            })));
+            })) as any);
             
           if (addError) throw addError;
         }
         
         // Items to update (those with an id)
         for (const item of items.filter(item => item.id)) {
-          const { error: updateItemError } = await supabase
-            .from('invoice_items')
+          const { error: updateItemError } = await (supabase as any)
+            .from('invoice_items' as any)
             .update({
-              product_id: item.product_id,
-              description: item.description,
-              quantity: item.quantity,
-              unit_price: item.unit_price,
-              tax_rate: item.tax_rate,
-              total_price: item.total_price
-            })
-            .eq('id', item.id);
+              product_id: (item as any).product_id,
+              description: (item as any).description,
+              quantity: (item as any).quantity,
+              unit_price: (item as any).unit_price,
+              tax_rate: (item as any).tax_rate,
+              total_price: (item as any).total_price
+            } as any)
+            .eq('id' as any, (item as any).id as any);
             
           if (updateItemError) throw updateItemError;
         }
         
         // Items to delete (those in existingItems but not in items)
-        const existingIds = existingItems?.map(item => item.id) || [];
-        const currentIds = items.filter(item => item.id).map(item => item.id);
+        const existingIds = ((existingItems as any[]) || []).map((item: any) => item.id) || [];
+        const currentIds = (items as any[]).filter((item: any) => item.id).map((item: any) => item.id);
         const idsToDelete = existingIds.filter(id => !currentIds.includes(id));
         
         if (idsToDelete.length > 0) {
-          const { error: deleteError } = await supabase
-            .from('invoice_items')
+          const { error: deleteError } = await (supabase as any)
+            .from('invoice_items' as any)
             .delete()
-            .in('id', idsToDelete);
+            .in('id' as any, idsToDelete as any);
             
           if (deleteError) throw deleteError;
         }
@@ -469,22 +567,22 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
       } else {
         // Create new invoice
         console.log('Creating new invoice');
-        const { data: invoiceData, error: invoiceError } = await supabase
-          .from('invoices')
+        const { data: invoiceData, error: invoiceError } = await (supabase as any)
+          .from('invoices' as any)
           .insert([{
-            customer_id: formData.customer_id,
-            status: formData.status,
-            date_issued: formData.date_issued,
-            date_due: formData.date_due,
-            note: formData.note,
-            billing_address_json: formData.billing_address_json,
-            shipping_address_json: formData.shipping_address_json,
+            customer_id: (formData as any).customer_id,
+            status: (formData as any).status,
+            date_issued: (formData as any).date_issued,
+            date_due: (formData as any).date_due,
+            note: (formData as any).note,
+            billing_address_json: (formData as any).billing_address_json,
+            shipping_address_json: (formData as any).shipping_address_json,
             total_ht: totals.totalHT,
             total_ttc: totals.totalTTC,
             tva: totals.totalTVA,
             amount_paid: 0,
-            document_type_id: formData.document_type_id
-          }])
+            document_type_id: (formData as any).document_type_id
+          }] as any)
           .select()
           .single();
 
@@ -495,9 +593,9 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
         
         // Add items
         if (items.length > 0) {
-          const { error: itemsError } = await supabase
-            .from('invoice_items')
-            .insert(items.map(item => ({
+          const { error: itemsError } = await (supabase as any)
+            .from('invoice_items' as any)
+            .insert(items.map((item: any) => ({
               invoice_id: newInvoiceId,
               product_id: item.product_id,
               description: item.description,
@@ -505,7 +603,7 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
               unit_price: item.unit_price,
               tax_rate: item.tax_rate,
               total_price: item.total_price
-            })));
+            })) as any);
             
           if (itemsError) throw itemsError;
         }
@@ -659,12 +757,12 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                     />
                   </div>
                   <ul className="py-1">
-                    {customers
-                      .filter(customer => 
-                        customer.name.toLowerCase().includes(customerSearchTerm.toLowerCase()) ||
-                        (customer.email && customer.email.toLowerCase().includes(customerSearchTerm.toLowerCase()))
+                    {(customers as any[])
+                      .filter((customer: any) => 
+                        (customer?.name || '').toLowerCase().includes(customerSearchTerm.toLowerCase()) ||
+                        (customer?.email && (customer.email as string).toLowerCase().includes(customerSearchTerm.toLowerCase()))
                       )
-                      .map(customer => (
+                      .map((customer: any) => (
                         <li 
                           key={customer.id}
                           className="px-4 py-2 hover:bg-gray-100 cursor-pointer flex justify-between items-center"
@@ -681,9 +779,9 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                           </span>
                         </li>
                       ))}
-                    {customers.filter(customer => 
-                      customer.name.toLowerCase().includes(customerSearchTerm.toLowerCase()) ||
-                      (customer.email && customer.email.toLowerCase().includes(customerSearchTerm.toLowerCase()))
+                    {(customers as any[]).filter((customer: any) => 
+                      (customer?.name || '').toLowerCase().includes(customerSearchTerm.toLowerCase()) ||
+                      (customer?.email && (customer.email as string).toLowerCase().includes(customerSearchTerm.toLowerCase()))
                     ).length === 0 && (
                       <li className="px-4 py-2 text-gray-500">
                         Aucun client trouvé
@@ -707,6 +805,130 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                       {selectedCustomer.customer_group === 'pro' ? 'Pro' : 'Particulier'}
                     </span>
                   </div>
+                </div>
+              )}
+
+              {/* Quick create customer */}
+              {!selectedCustomer && (
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowNewCustomerForm(v => !v)}
+                    className="px-3 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50"
+                  >
+                    {showNewCustomerForm ? 'Masquer le formulaire client' : 'Créer un client'}
+                  </button>
+
+                  {showNewCustomerForm && (
+                    <div className="mt-3 p-3 border rounded-md bg-gray-50 space-y-3">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-sm text-gray-700 mb-1">Nom complet</label>
+                          <input
+                            type="text"
+                            value={newCustomer.name}
+                            onChange={(e) => setNewCustomer((p: any) => ({ ...p, name: e.target.value }))}
+                            className="w-full px-3 py-2 border rounded-md"
+                            placeholder="NOM Prénom / Raison sociale"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm text-gray-700 mb-1">Groupe</label>
+                          <select
+                            value={newCustomer.customer_group}
+                            onChange={(e) => setNewCustomer((p: any) => ({ ...p, customer_group: e.target.value }))}
+                            className="w-full px-3 py-2 border rounded-md"
+                          >
+                            <option value="particulier">Particulier</option>
+                            <option value="pro">Pro</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm text-gray-700 mb-1">Email</label>
+                          <input
+                            type="email"
+                            value={newCustomer.email}
+                            onChange={(e) => setNewCustomer((p: any) => ({ ...p, email: e.target.value }))}
+                            className="w-full px-3 py-2 border rounded-md"
+                            placeholder="client@example.com"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm text-gray-700 mb-1">Téléphone</label>
+                          <input
+                            type="tel"
+                            value={newCustomer.phone}
+                            onChange={(e) => setNewCustomer((p: any) => ({ ...p, phone: e.target.value }))}
+                            className="w-full px-3 py-2 border rounded-md"
+                            placeholder="+33 ..."
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Adresse facturation</label>
+                          <input className="w-full px-3 py-2 border rounded-md mb-2" placeholder="Ligne 1"
+                            value={newCustomer.billing.line1}
+                            onChange={(e) => setNewCustomer((p: any) => ({ ...p, billing: { ...p.billing, line1: e.target.value } }))} />
+                          <input className="w-full px-3 py-2 border rounded-md mb-2" placeholder="Ligne 2"
+                            value={newCustomer.billing.line2}
+                            onChange={(e) => setNewCustomer((p: any) => ({ ...p, billing: { ...p.billing, line2: e.target.value } }))} />
+                          <div className="grid grid-cols-3 gap-2">
+                            <input className="px-3 py-2 border rounded-md" placeholder="Code postal"
+                              value={newCustomer.billing.zip}
+                              onChange={(e) => setNewCustomer((p: any) => ({ ...p, billing: { ...p.billing, zip: e.target.value } }))} />
+                            <input className="px-3 py-2 border rounded-md" placeholder="Ville"
+                              value={newCustomer.billing.city}
+                              onChange={(e) => setNewCustomer((p: any) => ({ ...p, billing: { ...p.billing, city: e.target.value } }))} />
+                            <input className="px-3 py-2 border rounded-md" placeholder="Pays"
+                              value={newCustomer.billing.country}
+                              onChange={(e) => setNewCustomer((p: any) => ({ ...p, billing: { ...p.billing, country: e.target.value } }))} />
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Adresse livraison</label>
+                          <label className="flex items-center gap-2 mb-2">
+                            <input type="checkbox" checked={newCustomer.shippingSameAsBilling}
+                              onChange={(e) => setNewCustomer((p: any) => ({ ...p, shippingSameAsBilling: e.target.checked }))} />
+                            <span className="text-sm text-gray-700">Identique à la facturation</span>
+                          </label>
+                          {!newCustomer.shippingSameAsBilling && (
+                            <>
+                              <input className="w-full px-3 py-2 border rounded-md mb-2" placeholder="Ligne 1"
+                                value={newCustomer.shipping.line1}
+                                onChange={(e) => setNewCustomer((p: any) => ({ ...p, shipping: { ...p.shipping, line1: e.target.value } }))} />
+                              <input className="w-full px-3 py-2 border rounded-md mb-2" placeholder="Ligne 2"
+                                value={newCustomer.shipping.line2}
+                                onChange={(e) => setNewCustomer((p: any) => ({ ...p, shipping: { ...p.shipping, line2: e.target.value } }))} />
+                              <div className="grid grid-cols-3 gap-2">
+                                <input className="px-3 py-2 border rounded-md" placeholder="Code postal"
+                                  value={newCustomer.shipping.zip}
+                                  onChange={(e) => setNewCustomer((p: any) => ({ ...p, shipping: { ...p.shipping, zip: e.target.value } }))} />
+                                <input className="px-3 py-2 border rounded-md" placeholder="Ville"
+                                  value={newCustomer.shipping.city}
+                                  onChange={(e) => setNewCustomer((p: any) => ({ ...p, shipping: { ...p.shipping, city: e.target.value } }))} />
+                                <input className="px-3 py-2 border rounded-md" placeholder="Pays"
+                                  value={newCustomer.shipping.country}
+                                  onChange={(e) => setNewCustomer((p: any) => ({ ...p, shipping: { ...p.shipping, country: e.target.value } }))} />
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          onClick={createAndSelectCustomer}
+                          className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
+                        >
+                          Créer et associer le client
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -796,7 +1018,7 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                   onChange={(e) => {
                     const addressId = e.target.value;
                     if (addressId) {
-                      const address = selectedCustomer.addresses?.find(a => a.id === addressId);
+                      const address = (selectedCustomer?.addresses as any[])?.find((a: any) => a.id === addressId);
                       if (address) {
                         const addressJson: Address = {
                           line1: address.line1,
@@ -812,12 +1034,12 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                     }
                   }}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  defaultValue={selectedCustomer.addresses.find(a => a.address_type === 'billing' && a.is_default)?.id || ''}
+                  defaultValue={(selectedCustomer.addresses as any[]).find((a: any) => a.address_type === 'billing' && a.is_default)?.id || ''}
                 >
                   <option value="">Sélectionner une adresse</option>
-                  {selectedCustomer.addresses
-                    .filter(address => address.address_type === 'billing')
-                    .map(address => (
+                  {(selectedCustomer.addresses as any[])
+                    .filter((address: any) => address.address_type === 'billing')
+                    .map((address: any) => (
                       <option key={address.id} value={address.id}>
                         {address.line1}, {address.zip} {address.city}
                       </option>
@@ -849,7 +1071,7 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                   onChange={(e) => {
                     const addressId = e.target.value;
                     if (addressId) {
-                      const address = selectedCustomer.addresses?.find(a => a.id === addressId);
+                      const address = (selectedCustomer?.addresses as any[])?.find((a: any) => a.id === addressId);
                       if (address) {
                         const addressJson: Address = {
                           line1: address.line1,
@@ -865,12 +1087,12 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                     }
                   }}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  defaultValue={selectedCustomer.addresses.find(a => a.address_type === 'shipping' && a.is_default)?.id || ''}
+                  defaultValue={(selectedCustomer.addresses as any[]).find((a: any) => a.address_type === 'shipping' && a.is_default)?.id || ''}
                 >
                   <option value="">Sélectionner une adresse</option>
-                  {selectedCustomer.addresses
-                    .filter(address => address.address_type === 'shipping')
-                    .map(address => (
+                  {(selectedCustomer.addresses as any[])
+                    .filter((address: any) => address.address_type === 'shipping')
+                    .map((address: any) => (
                       <option key={address.id} value={address.id}>
                         {address.line1}, {address.zip} {address.city}
                       </option>
@@ -934,18 +1156,7 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                   Produit
                 </label>
                 <div className="relative">
-                  <input
-                    type="text"
-                    value={productSearchTerm}
-                    onChange={(e) => {
-                      setProductSearchTerm(e.target.value);
-                      setShowProductDropdown(true);
-                    }}
-                    placeholder="Rechercher un produit..."
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    onFocus={() => setShowProductDropdown(true)}
-                  />
-                  <Search className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
+                  <ProductSearch onSearch={setProductSearchTerm} initialQuery={productSearchTerm} />
                 </div>
                 
                 {showProductDropdown && filteredProducts.length > 0 && (

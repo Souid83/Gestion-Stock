@@ -53,9 +53,11 @@ export const useAppSettingsStore = create<AppSettingsState>((set, get) => ({
       const settingsObject = { ...DEFAULT_SETTINGS };
       
       if (data && data.length > 0) {
-        data.forEach((item: { key: keyof AppSettings; value: string }) => {
-          if (item.key in DEFAULT_SETTINGS) {
-            settingsObject[item.key] = item.value;
+        (data as any[]).forEach((item: any) => {
+          const k = item?.key as keyof AppSettings;
+          const v = String(item?.value ?? '');
+          if (k && (k in DEFAULT_SETTINGS)) {
+            (settingsObject as any)[k] = v;
           }
         });
       }
@@ -77,9 +79,9 @@ export const useAppSettingsStore = create<AppSettingsState>((set, get) => ({
       
       // Check if the setting already exists
       const { data: existingData, error: checkError } = await supabase
-        .from('app_settings')
+        .from('app_settings' as any)
         .select('*')
-        .eq('key', key)
+        .eq('key' as any, key as any)
         .maybeSingle();
         
       if (checkError) throw checkError;
@@ -89,16 +91,16 @@ export const useAppSettingsStore = create<AppSettingsState>((set, get) => ({
       if (existingData) {
         // Update existing setting
         const { error } = await supabase
-          .from('app_settings')
-          .update({ value })
-          .eq('key', key);
+          .from('app_settings' as any)
+          .update({ value } as any)
+          .eq('key' as any, key as any);
           
         updateError = error;
       } else {
         // Insert new setting
         const { error } = await supabase
-          .from('app_settings')
-          .insert([{ key, value }]);
+          .from('app_settings' as any)
+          .insert([{ key, value }] as any);
           
         updateError = error;
       }
@@ -137,7 +139,10 @@ export const useAppSettingsStore = create<AppSettingsState>((set, get) => ({
       // Upload file to Supabase Storage
       const { error: uploadError } = await supabase.storage
         .from('app-assets')
-        .upload(filePath, file);
+        .upload(filePath, file, {
+          upsert: true,
+          contentType: (file as any).type || 'image/png'
+        } as any);
         
       if (uploadError) throw uploadError;
       

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 import { X, Plus, Save, Trash2 } from 'lucide-react';
+import { syncEbayForProducts } from '../../services/stock';
 
 interface Stock {
   id: string;
@@ -261,6 +262,13 @@ export const StockManager: React.FC<StockManagerProps> = ({
         .eq('id', productId as any);
 
       if (updateError) throw updateError;
+
+      // Auto-sync vers eBay pour les produits déjà mappés (best effort)
+      try {
+        await syncEbayForProducts([productId]);
+      } catch (e) {
+        console.warn('syncEbayForProducts failed', e);
+      }
 
       setHasChanges(false);
       if (onStockUpdate) {

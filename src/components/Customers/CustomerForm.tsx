@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useCustomerStore } from '../../store/customerStore';
 import { Save, Plus, Trash2, User, MapPin, Phone, Mail, Building, Home, X } from 'lucide-react';
 import { CustomerInsert, CustomerAddress, CustomerWithAddresses } from '../../types/customers';
+import { supabase } from '../../lib/supabase';
 
 interface CustomerFormProps {
   customerId?: string;
@@ -9,6 +10,34 @@ interface CustomerFormProps {
 }
 
 export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved }) => {
+
+  // Map French postal codes (CP) to regions (incl. DROM)
+  const regionFromPostalCode = (cp: string): string => {
+    const s = (cp || '').trim();
+    if (!s) return '';
+    if (s.startsWith('971')) return 'Guadeloupe';
+    if (s.startsWith('972')) return 'Martinique';
+    if (s.startsWith('973')) return 'Guyane';
+    if (s.startsWith('974')) return 'La Réunion';
+    if (s.startsWith('976')) return 'Mayotte';
+    const dpt = s.startsWith('20') ? '20' : s.substring(0, 2);
+    const map: Record<string, string> = {
+      '01': 'Auvergne-Rhône-Alpes','03':'Auvergne-Rhône-Alpes','07':'Auvergne-Rhône-Alpes','15':'Auvergne-Rhône-Alpes','26':'Auvergne-Rhône-Alpes','38':'Auvergne-Rhône-Alpes','42':'Auvergne-Rhône-Alpes','43':'Auvergne-Rhône-Alpes','63':'Auvergne-Rhône-Alpes','69':'Auvergne-Rhône-Alpes','73':'Auvergne-Rhône-Alpes','74':'Auvergne-Rhône-Alpes',
+      '21':'Bourgogne-Franche-Comté','25':'Bourgogne-Franche-Comté','39':'Bourgogne-Franche-Comté','58':'Bourgogne-Franche-Comté','70':'Bourgogne-Franche-Comté','71':'Bourgogne-Franche-Comté','89':'Bourgogne-Franche-Comté','90':'Bourgogne-Franche-Comté',
+      '22':'Bretagne','29':'Bretagne','35':'Bretagne','56':'Bretagne',
+      '18':'Centre-Val de Loire','28':'Centre-Val de Loire','36':'Centre-Val de Loire','37':'Centre-Val de Loire','41':'Centre-Val de Loire','45':'Centre-Val de Loire',
+      '2A':'Corse','2B':'Corse','20':'Corse',
+      '08':'Grand Est','10':'Grand Est','51':'Grand Est','52':'Grand Est','54':'Grand Est','55':'Grand Est','57':'Grand Est','67':'Grand Est','68':'Grand Est','88':'Grand Est',
+      '02':'Hauts-de-France','59':'Hauts-de-France','60':'Hauts-de-France','62':'Hauts-de-France','80':'Hauts-de-France',
+      '75':'Île-de-France','77':'Île-de-France','78':'Île-de-France','91':'Île-de-France','92':'Île-de-France','93':'Île-de-France','94':'Île-de-France','95':'Île-de-France',
+      '14':'Normandie','27':'Normandie','50':'Normandie','61':'Normandie','76':'Normandie',
+      '16':'Nouvelle-Aquitaine','17':'Nouvelle-Aquitaine','19':'Nouvelle-Aquitaine','23':'Nouvelle-Aquitaine','24':'Nouvelle-Aquitaine','33':'Nouvelle-Aquitaine','40':'Nouvelle-Aquitaine','47':'Nouvelle-Aquitaine','64':'Nouvelle-Aquitaine','79':'Nouvelle-Aquitaine','86':'Nouvelle-Aquitaine','87':'Nouvelle-Aquitaine',
+      '09':'Occitanie','11':'Occitanie','12':'Occitanie','30':'Occitanie','31':'Occitanie','32':'Occitanie','34':'Occitanie','46':'Occitanie','48':'Occitanie','65':'Occitanie','66':'Occitanie','81':'Occitanie','82':'Occitanie',
+      '44':'Pays de la Loire','49':'Pays de la Loire','53':'Pays de la Loire','72':'Pays de la Loire','85':'Pays de la Loire',
+      '04':"Provence-Alpes-Côte d'Azur",'05':"Provence-Alpes-Côte d'Azur",'06':"Provence-Alpes-Côte d'Azur",'13':"Provence-Alpes-Côte d'Azur",'83':"Provence-Alpes-Côte d'Azur",'84':"Provence-Alpes-Côte d'Azur"
+    };
+    return map[dpt] || '';
+  };
   const { 
     getCustomerById, 
     addCustomer, 
@@ -28,12 +57,20 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
     phone: '',
     customer_group: 'particulier',
     zone: '',
+    siren: '',
     notes: ''
   });
   
   // Addresses state
   const [billingAddresses, setBillingAddresses] = useState<CustomerAddress[]>([]);
   const [shippingAddresses, setShippingAddresses] = useState<CustomerAddress[]>([]);
+
+  // Extra contacts (multi emails/phones)
+  const [extraEmails, setExtraEmails] = useState<string[]>([]);
+  const [extraEmailInput, setExtraEmailInput] = useState<string>('');
+  const [extraPhones, setExtraPhones] = useState<string[]>([]);
+  const [extraPhoneInput, setExtraPhoneInput] = useState<string>('');
+  const [editAddressId, setEditAddressId] = useState<string | null>(null);
   
   // New address form state
   const [showNewAddressForm, setShowNewAddressForm] = useState(false);
@@ -44,6 +81,7 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
     zip: '',
     city: '',
     country: 'France',
+    region: '',
     is_default: false
   });
   
@@ -54,13 +92,15 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
         const customer = await getCustomerById(customerId);
         if (customer) {
           // Set customer data
+          const c: any = customer;
           setFormData({
-            name: customer.name,
-            email: customer.email || '',
-            phone: customer.phone || '',
-            customer_group: customer.customer_group,
-            zone: customer.zone || '',
-            notes: customer.notes || ''
+            name: c.name,
+            email: c.email || '',
+            phone: c.phone || '',
+            customer_group: c.customer_group,
+            zone: c.zone || '',
+            siren: c.siren || '',
+            notes: c.notes || ''
           });
           
           // Set addresses
@@ -74,17 +114,63 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
       loadCustomer();
     }
   }, [customerId, getCustomerById]);
+
+  // Load existing contacts (emails/phones) if editing
+  useEffect(() => {
+    const fetchContacts = async () => {
+      if (!customerId) return;
+      try {
+        // Emails
+        const { data: emailRows } = await (supabase as any)
+          .from('customer_emails' as any)
+          .select('*' as any)
+          .eq('customer_id' as any, customerId as any);
+        if (Array.isArray(emailRows)) {
+          const primary = emailRows.find((r: any) => r.is_primary);
+          const others = emailRows.filter((r: any) => !r.is_primary).map((r: any) => r.email);
+          if (primary && !formData.email) {
+            setFormData((prev: any) => ({ ...prev, email: primary.email }));
+          }
+          setExtraEmails(others);
+        }
+        // Phones
+        const { data: phoneRows } = await (supabase as any)
+          .from('customer_phones' as any)
+          .select('*' as any)
+          .eq('customer_id' as any, customerId as any);
+        if (Array.isArray(phoneRows)) {
+          const primary = phoneRows.find((r: any) => r.is_primary);
+          const others = phoneRows.filter((r: any) => !r.is_primary).map((r: any) => r.phone);
+          if (primary && !formData.phone) {
+            setFormData((prev: any) => ({ ...prev, phone: primary.phone }));
+          }
+          setExtraPhones(others);
+        }
+      } catch (e) {
+        console.warn('fetchContacts failed', e);
+      }
+    };
+    fetchContacts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerId]);
   
   // Handle form input changes
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    setFormData((prev: any) => ({ ...prev, [name]: value }));
   };
   
   // Handle new address input changes
   const handleAddressChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
-    setNewAddress(prev => ({ ...prev, [name]: value }));
+    if (name === 'zip') {
+      const r = regionFromPostalCode(value);
+      setNewAddress((prev: any) => ({ ...prev, zip: value, region: r }));
+      // Auto-fill customer zone with region
+      setFormData((prev: any) => ({ ...prev, zone: r || prev.zone }));
+    } else {
+      setNewAddress((prev: any) => ({ ...prev, [name]: value }));
+    }
   };
   
   // Handle checkbox change
@@ -98,22 +184,45 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
     e.preventDefault();
     
     try {
-      let customerId: string;
+      let savedCustomerId = customerId as string | undefined;
       
-      if (customerId) {
+      if (savedCustomerId) {
         // Update existing customer
-        const updatedCustomer = await updateCustomer(customerId, formData);
+        const updatedCustomer = await updateCustomer(savedCustomerId, formData as any);
         if (!updatedCustomer) throw new Error('Failed to update customer');
-        customerId = updatedCustomer.id;
+        savedCustomerId = updatedCustomer.id;
       } else {
         // Create new customer
-        const newCustomer = await addCustomer(formData);
+        const newCustomer = await addCustomer(formData as any);
         if (!newCustomer) throw new Error('Failed to create customer');
-        customerId = newCustomer.id;
+        savedCustomerId = newCustomer.id;
       }
       
-      if (onSaved) {
-        onSaved(customerId);
+      // Upsert contacts into structured tables (primary = main fields)
+      if (savedCustomerId) {
+        const emailRows = [
+          ...(formData.email ? [{ customer_id: savedCustomerId, email: formData.email, is_primary: true }] : []),
+          ...extraEmails.map(e => ({ customer_id: savedCustomerId, email: e, is_primary: false }))
+        ];
+        if (emailRows.length > 0) {
+          await (supabase as any)
+            .from('customer_emails' as any)
+            .upsert(emailRows as any, { onConflict: 'customer_id,email' } as any);
+        }
+
+        const phoneRows = [
+          ...(formData.phone ? [{ customer_id: savedCustomerId, phone: formData.phone, is_primary: true }] : []),
+          ...extraPhones.map(p => ({ customer_id: savedCustomerId, phone: p, is_primary: false }))
+        ];
+        if (phoneRows.length > 0) {
+          await (supabase as any)
+            .from('customer_phones' as any)
+            .upsert(phoneRows as any, { onConflict: 'customer_id,phone' } as any);
+        }
+      }
+
+      if (onSaved && savedCustomerId) {
+        onSaved(savedCustomerId);
       }
     } catch (err) {
       console.error('Error saving customer:', err);
@@ -133,41 +242,58 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
     }
     
     try {
-      const addressData = {
-        customer_id: customerId,
-        address_type: newAddressType,
+      const payload: any = {
         line1: newAddress.line1,
         line2: newAddress.line2,
         zip: newAddress.zip,
         city: newAddress.city,
         country: newAddress.country,
+        region: newAddress.region || regionFromPostalCode(newAddress.zip),
         is_default: newAddress.is_default
       };
-      
-      const newAddr = await addAddress(addressData);
-      
-      if (newAddr) {
-        // Update the appropriate address list
-        if (newAddressType === 'billing') {
-          setBillingAddresses(prev => [...prev, newAddr]);
-        } else {
-          setShippingAddresses(prev => [...prev, newAddr]);
+
+      if (editAddressId) {
+        // Update existing address
+        const updated = await updateAddress(editAddressId, payload);
+        if (updated) {
+          if (newAddressType === 'billing') {
+            setBillingAddresses(prev => prev.map(a => (a.id === editAddressId ? { ...a, ...updated } as any : a)));
+          } else {
+            setShippingAddresses(prev => prev.map(a => (a.id === editAddressId ? { ...a, ...updated } as any : a)));
+          }
         }
-        
-        // Reset form
-        setNewAddress({
-          line1: '',
-          line2: '',
-          zip: '',
-          city: '',
-          country: 'France',
-          is_default: false
-        });
-        
-        setShowNewAddressForm(false);
+      } else {
+        // Insert new address
+        const addressData = {
+          customer_id: customerId,
+          address_type: newAddressType,
+          ...payload
+        } as any;
+
+        const newAddr = await addAddress(addressData);
+        if (newAddr) {
+          if (newAddressType === 'billing') {
+            setBillingAddresses(prev => [...prev, newAddr]);
+          } else {
+            setShippingAddresses(prev => [...prev, newAddr]);
+          }
+        }
       }
+
+      // Reset form
+      setNewAddress({
+        line1: '',
+        line2: '',
+        zip: '',
+        city: '',
+        country: 'France',
+        region: '',
+        is_default: false
+      });
+      setEditAddressId(null);
+      setShowNewAddressForm(false);
     } catch (err) {
-      console.error('Error adding address:', err);
+      console.error('Error saving address:', err);
     }
   };
   
@@ -280,6 +406,22 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
                 <option value="pro">Professionnel</option>
               </select>
             </div>
+
+            {formData.customer_group === 'pro' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  SIREN
+                </label>
+                <input
+                  type="text"
+                  name="siren"
+                  value={(formData as any).siren || ''}
+                  onChange={handleChange}
+                  placeholder="9 chiffres"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+            )}
             
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -292,8 +434,55 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
                   value={formData.email}
                   onChange={handleChange}
                   className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="Email principal"
                 />
                 <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
+              </div>
+
+              {/* Emails supplémentaires */}
+              <div className="mt-2">
+                <label className="block text-xs text-gray-600 mb-1">
+                  Emails supplémentaires
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="email"
+                    value={extraEmailInput}
+                    onChange={(e) => setExtraEmailInput(e.target.value)}
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Ajouter un email"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const v = extraEmailInput.trim();
+                      if (!v) return;
+                      if ([formData.email, ...extraEmails].includes(v)) return;
+                      setExtraEmails(prev => [...prev, v]);
+                      setExtraEmailInput('');
+                    }}
+                    className="px-3 py-2 bg-gray-200 rounded-md hover:bg-gray-300 text-sm"
+                  >
+                    <Plus size={14} />
+                  </button>
+                </div>
+                {extraEmails.length > 0 && (
+                  <ul className="mt-2 space-y-1">
+                    {extraEmails.map((em, idx) => (
+                      <li key={em} className="flex items-center justify-between text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded px-2 py-1">
+                        <span>{em}</span>
+                        <button
+                          type="button"
+                          onClick={() => setExtraEmails(prev => prev.filter((_, i) => i !== idx))}
+                          className="text-red-600 hover:text-red-800"
+                          title="Supprimer"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             </div>
             
@@ -308,8 +497,55 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
                   value={formData.phone}
                   onChange={handleChange}
                   className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="Téléphone principal"
                 />
                 <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
+              </div>
+
+              {/* Téléphones supplémentaires */}
+              <div className="mt-2">
+                <label className="block text-xs text-gray-600 mb-1">
+                  Téléphones supplémentaires
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="tel"
+                    value={extraPhoneInput}
+                    onChange={(e) => setExtraPhoneInput(e.target.value)}
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Ajouter un téléphone"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const v = extraPhoneInput.trim();
+                      if (!v) return;
+                      if ([formData.phone, ...extraPhones].includes(v)) return;
+                      setExtraPhones(prev => [...prev, v]);
+                      setExtraPhoneInput('');
+                    }}
+                    className="px-3 py-2 bg-gray-200 rounded-md hover:bg-gray-300 text-sm"
+                  >
+                    <Plus size={14} />
+                  </button>
+                </div>
+                {extraPhones.length > 0 && (
+                  <ul className="mt-2 space-y-1">
+                    {extraPhones.map((ph, idx) => (
+                      <li key={`${ph}-${idx}`} className="flex items-center justify-between text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded px-2 py-1">
+                        <span>{ph}</span>
+                        <button
+                          type="button"
+                          onClick={() => setExtraPhones(prev => prev.filter((_, i) => i !== idx))}
+                          className="text-red-600 hover:text-red-800"
+                          title="Supprimer"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             </div>
             
@@ -381,6 +617,26 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
                           <p>{address.country}</p>
                         </div>
                         <div className="flex flex-col space-y-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNewAddressType('billing');
+                              setNewAddress({
+                                line1: address.line1,
+                                line2: address.line2 || '',
+                                zip: address.zip,
+                                city: address.city,
+                                country: address.country,
+                                region: (address as any).region || regionFromPostalCode(address.zip),
+                                is_default: !!address.is_default
+                              } as any);
+                              setEditAddressId(address.id);
+                              setShowNewAddressForm(true);
+                            }}
+                            className="text-gray-700 hover:text-gray-900 text-sm"
+                          >
+                            Modifier
+                          </button>
                           {!address.is_default && (
                             <button
                               type="button"
@@ -448,6 +704,26 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
                           <p>{address.country}</p>
                         </div>
                         <div className="flex flex-col space-y-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNewAddressType('shipping');
+                              setNewAddress({
+                                line1: address.line1,
+                                line2: address.line2 || '',
+                                zip: address.zip,
+                                city: address.city,
+                                country: address.country,
+                                region: (address as any).region || regionFromPostalCode(address.zip),
+                                is_default: !!address.is_default
+                              } as any);
+                              setEditAddressId(address.id);
+                              setShowNewAddressForm(true);
+                            }}
+                            className="text-gray-700 hover:text-gray-900 text-sm"
+                          >
+                            Modifier
+                          </button>
                           {!address.is_default && (
                             <button
                               type="button"
@@ -492,11 +768,13 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
           <div className="bg-white rounded-lg p-6 w-full max-w-md">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-lg font-semibold">
-                {newAddressType === 'billing' ? 'Nouvelle adresse de facturation' : 'Nouvelle adresse de livraison'}
+                {editAddressId
+                  ? (newAddressType === 'billing' ? 'Modifier adresse de facturation' : 'Modifier adresse de livraison')
+                  : (newAddressType === 'billing' ? 'Nouvelle adresse de facturation' : 'Nouvelle adresse de livraison')}
               </h2>
               <button
                 type="button"
-                onClick={() => setShowNewAddressForm(false)}
+                onClick={() => { setEditAddressId(null); setShowNewAddressForm(false); }}
                 className="text-gray-500 hover:text-gray-700"
               >
                 <X size={20} />

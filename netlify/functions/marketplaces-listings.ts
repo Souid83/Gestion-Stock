@@ -367,20 +367,37 @@ export const handler = async (event: any) => {
       if (productIds.length > 0) {
         // Load shared quantity (view) + fallback quantities and internal price (table)
         const { data: vw } = await supabaseService
-          .from('products_with_stock')
-          .select('id, shared_quantity')
+          .from('clear_products_with_stock')
+          .select('id, mirror_stock')
           .in('id', productIds);
 
         const { data: prodRows } = await supabaseService
           .from('products')
-          .select('id, shared_stock_id, stock_total, stock, retail_price')
+          .select('id, mirror_of, shared_stock_id, stock_total, stock, retail_price')
           .in('id', productIds);
 
         const qtyByProductId: Record<string, number | null> = {};
         const internalPriceByProductId: Record<string, number | null> = {};
 
-        // Load pool quantities from shared_stocks for products that belong to a shared pool
-        const sharedStockIds = Array.from(new Set((prodRows || []).map((p: any) => p.shared_stock_id).filter(Boolean)));
+        // Merge with mirror parents if any
+        let allVw = vw || [];
+        let allProdRows = prodRows || [];
+        const parentIds = Array.from(new Set((allProdRows || []).map((p: any) => p.mirror_of).filter(Boolean)));
+        if (parentIds.length > 0) {
+          const { data: vwParents } = await supabaseService
+            .from('clear_products_with_stock')
+            .select('id, mirror_stock')
+            .in('id', parentIds);
+          const { data: parentRows } = await supabaseService
+            .from('products')
+            .select('id, mirror_of, shared_stock_id, stock_total, stock, retail_price')
+            .in('id', parentIds);
+          allVw = [...allVw, ...(vwParents || [])];
+          allProdRows = [...allProdRows, ...(parentRows || [])];
+        }
+
+        // Load pool quantities from shared_stocks for products that belong to a shared pool (including parents)
+        const sharedStockIds = Array.from(new Set((allProdRows || []).map((p: any) => p.shared_stock_id).filter(Boolean)));
         let poolQtyByStockId: Record<string, number | null> = {};
         if (sharedStockIds.length > 0) {
           const { data: pools } = await supabaseService
@@ -394,8 +411,8 @@ export const handler = async (event: any) => {
           });
         }
 
-        // Build internal price map + quantity fallbacks from products table
-        (prodRows || []).forEach((p: any) => {
+        // Build internal price map + quantity fallbacks from products table (including mirror parents)
+        (allProdRows || []).forEach((p: any) => {
           internalPriceByProductId[p.id] =
             typeof p.retail_price === 'number' ? p.retail_price : (p.retail_price ?? null);
 
@@ -405,16 +422,31 @@ export const handler = async (event: any) => {
           // 3) products.stock_total
           // 4) products.stock
           const poolQty = p.shared_stock_id ? poolQtyByStockId[p.shared_stock_id] : null;
-          const shared = (vw || []).find((s: any) => s.id === p.id)?.shared_quantity;
-          const candidates = [poolQty, shared, p.stock_total, p.stock];
+          const mirrorVal = (allVw || []).find((s: any) => s.id === p.id)?.mirror_stock;
+          const candidates = [poolQty, mirrorVal, p.stock_total, p.stock];
           const picked = candidates.find((q) => typeof q === 'number');
           qtyByProductId[p.id] = typeof picked === 'number' ? picked : null;
         });
 
-        // If view returned a shared_quantity, it takes precedence
-        (vw || []).forEach((s: any) => {
-          if (typeof s.shared_quantity === 'number') {
-            qtyByProductId[s.id] = s.shared_quantity;
+        // If view returned a mirror_stock, it takes precedence
+        (allVw || []).forEach((s: any) => {
+          if (typeof s.mirror_stock === 'number') {
+            qtyByProductId[s.id] = s.mirror_stock;
+          }
+        });
+
+        // Mirror children: force child quantity to parent's quantity when available + debug logs
+        (prodRows || []).forEach((p: any) => {
+          if (p && p.id && p.mirror_of) {
+            const parentQty = qtyByProductId[p.mirror_of];
+            if (typeof parentQty === 'number') {
+              qtyByProductId[p.id] = parentQty;
+            }
+            console.info('mirror_debug', {
+              child_id: p.id,
+              parent_id: p.mirror_of,
+              resolved_parent_qty: typeof parentQty === 'number' ? parentQty : null
+            });
           }
         });
 
@@ -472,7 +504,9 @@ export const handler = async (event: any) => {
     console.info('🔎 Sample offers (sku/price):', sampleOffers);
 
     const defaultCurrency = account.currency || 'EUR';
-    const items = allOffers.map((offer) => ({
+
+    // Real offers coming from eBay "offer" API
+    const itemsOffers = allOffers.map((offer) => ({
       provider: 'ebay',
       marketplace_account_id: account_id,
       remote_id: offer && offer.offerId ? offer.offerId : null,
@@ -498,11 +532,42 @@ export const handler = async (event: any) => {
       updated_at: new Date().toISOString()
     })).filter((it) => it.remote_id);
 
-    // Strip non-persistent fields before DB upsert
-    // Do not persist product_id (only for UI), nor qty_ebay/qty_app
-    const dbItems = items.map(({ qty_ebay, qty_app, product_id, internal_price, ...rest }) => rest);
+    // Inventory placeholders for SKUs present in inventory but with no offer yet
+    const offerSkuSet = new Set(
+      allOffers.map((o: any) => (o && o.sku ? o.sku : null)).filter(Boolean)
+    );
+    const itemsPlaceholders = (skus || [])
+      .filter((sku: string) => !offerSkuSet.has(sku))
+      .map((sku: string) => ({
+        provider: 'ebay',
+        marketplace_account_id: account_id,
+        // Mark as inventory-only row
+        remote_id: `inv:${sku}`,
+        remote_sku: sku,
+        title: '',
+        price_amount: null,
+        price_currency: defaultCurrency,
+        status_sync: 'unmapped' as const,
+        metadata: {
+          listingStatus: null,
+          marketplaceId: null,
+          availableQuantity: null,
+          format: null
+        },
+        product_id: productIdBySku[sku] ?? null,
+        internal_price: internalPriceBySku[sku] ?? null,
+        qty_ebay: typeof qtyEbayBySku[sku] === 'number' ? qtyEbayBySku[sku] : null,
+        qty_app: typeof qtyAppBySku[sku] === 'number' ? qtyAppBySku[sku] : null,
+        updated_at: new Date().toISOString()
+      }));
 
-    console.info('💾 Upserting', items.length, 'items');
+    const items = [...itemsOffers, ...itemsPlaceholders];
+
+    // Strip non-persistent fields before DB upsert (offers only)
+    // Do not persist product_id (only for UI), nor qty_ebay/qty_app
+    const dbItems = itemsOffers.map(({ qty_ebay, qty_app, product_id, internal_price, ...rest }) => rest);
+
+    console.info('💾 Upserting', itemsOffers.length, 'offer items; returning', items.length, 'total items incl. placeholders');
 
     if (items.length > 0) {
       const { error: upsertError } = await supabaseService

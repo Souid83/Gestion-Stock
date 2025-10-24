@@ -2,3 +2,8 @@
 from = "/*"
 to = "/index.html"
 status = 200
+
+# Scheduled Netlify Function: ebay-orders-sync
+# Runs every 5 minutes to ingest eBay orders and decrement EBAY stock on parent products
+[functions."ebay-orders-sync"]
+  schedule = "*/5 * * * *"

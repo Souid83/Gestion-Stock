@@ -22,6 +22,7 @@ interface PricingListing {
   price_eur: number | null;
   internal_price: number | null;
   product_id: string | null;
+  product_name?: string | null; // Nom produit (app) pour affichage
   sync_status: 'ok' | 'pending' | 'failed' | 'unmapped';
   is_mapped: boolean;
   qty_ebay?: number | null;
@@ -31,6 +32,7 @@ interface PricingListing {
 interface FilterState {
   searchQuery: string;
   unmappedFirst: boolean;
+  diffFirst: boolean;
   statusFilter: 'all' | 'ok' | 'pending' | 'failed';
 }
 
@@ -73,6 +75,7 @@ export default function MarketplacePricing() {
   const [filters, setFilters] = useState<FilterState>({
     searchQuery: '',
     unmappedFirst: true,
+    diffFirst: true,
     statusFilter: 'all'
   });
   const [currentPage, setCurrentPage] = useState(1);
@@ -89,6 +92,26 @@ export default function MarketplacePricing() {
   const [itemsToSync, setItemsToSync] = useState<{ sku: string; quantity: number }[]>([]);
   const [autoLinkAttempted, setAutoLinkAttempted] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
+
+  // Nouveaux états: chargement global (toutes pages) et sync massive
+  const [isLoadingAll, setIsLoadingAll] = useState(false);
+  const [isBulkSyncing, setIsBulkSyncing] = useState(false);
+  const [useAllLocal, setUseAllLocal] = useState(false);
+  const [showDiffModal, setShowDiffModal] = useState(false);
+  const [diffRows, setDiffRows] = useState<PricingListing[]>([]);
+  const [selectedDiff, setSelectedDiff] = useState<Record<string, boolean>>({});
+
+  // Non mappés: sélection et lien en masse par SKU
+  const [showUnmappedModal, setShowUnmappedModal] = useState(false);
+  const [unmappedRows, setUnmappedRows] = useState<PricingListing[]>([]);
+  const [selectedUnmapped, setSelectedUnmapped] = useState<Record<string, boolean>>({});
+
+  const [loadingProgress, setLoadingProgress] = useState<{ open: boolean; current: number; total: number; done: boolean }>({
+    open: false,
+    current: 0,
+    total: 0,
+    done: false
+  });
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -159,9 +182,51 @@ export default function MarketplacePricing() {
     setAutoLinkAttempted(false);
   }, [selectedAccountId, currentPage]);
 
-  // Fetch listings quand accountId, filters ou page changent
+  // Charger depuis le cache local si disponible (évite de recharger à chaque retour)
   useEffect(() => {
     if (!selectedAccountId) return;
+    try {
+      const key = `pricing_cache:ebay:${selectedAccountId}`;
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.listings)) {
+          setListings(parsed.listings);
+          setUseAllLocal(true);
+          setTotalCount(Number(parsed.total) || parsed.listings.length);
+          if (parsed.filters) {
+            setFilters((prev) => ({ ...prev, ...parsed.filters }));
+          }
+          if (parsed.currentPage) {
+            setCurrentPage(Number(parsed.currentPage) || 1);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('⚠️ cache_load_failed', (e as any)?.message || e);
+    }
+  }, [selectedAccountId]);
+
+  // Sauvegarder dans le cache local quand on travaille en mémoire
+  useEffect(() => {
+    if (!selectedAccountId || !useAllLocal) return;
+    try {
+      const key = `pricing_cache:ebay:${selectedAccountId}`;
+      const payload = {
+        listings,
+        total: totalCount,
+        filters,
+        currentPage
+      };
+      localStorage.setItem(key, JSON.stringify(payload));
+    } catch (e) {
+      console.warn('⚠️ cache_save_failed', (e as any)?.message || e);
+    }
+  }, [listings, filters, currentPage, useAllLocal, selectedAccountId, totalCount]);
+
+  // Fetch listings quand accountId, filters ou page changent
+  useEffect(() => {
+    if (!selectedAccountId || useAllLocal) return;
 
     const fetchListings = async () => {
       setIsLoadingListings(true);
@@ -212,7 +277,7 @@ export default function MarketplacePricing() {
         setTotalCount(data.total || data.count || 0);
 
         // Map backend shape → UI PricingListing shape
-        const mapped: PricingListing[] = (data.items || []).map((it: any) => {
+        let mapped: PricingListing[] = (data.items || []).map((it: any) => {
           const priceAmount =
             typeof it?.price_amount === 'number'
               ? it.price_amount
@@ -239,6 +304,50 @@ export default function MarketplacePricing() {
             qty_app: typeof it?.qty_app === 'number' ? it.qty_app : (it?.qty_app ?? null)
           };
         });
+
+        // Lookup noms produits (app) pour meilleure lisibilité
+        try {
+          const ids = Array.from(
+            new Set(mapped.map(m => m.product_id).filter((v): v is string => !!v))
+          );
+          if (ids.length > 0) {
+            const { data: prodNames } = await supabase
+              .from('products')
+              .select('id,name')
+              .in('id', ids as any);
+            const nameById: Record<string, string> = {};
+            (prodNames || []).forEach((p: any) => {
+              if (p?.id) nameById[p.id] = p.name || '';
+            });
+            mapped = mapped.map(m => ({
+              ...m,
+              product_name: m.product_id ? (nameById[m.product_id] ?? null) : null
+            }));
+          }
+        } catch (e) {
+          console.warn('⚠️ product_name lookup failed', (e as any)?.message || e);
+        }
+
+        try {
+          const skus = Array.from(
+            new Set(mapped.filter(m => !m.product_name && m.remote_sku).map(m => m.remote_sku))
+          );
+          if (skus.length > 0) {
+            const { data: prodBySku } = await supabase
+              .from('products')
+              .select('sku,name')
+              .in('sku', skus as any);
+            const nameBySku: Record<string, string> = {};
+            (prodBySku || []).forEach((p: any) => {
+              if (p?.sku) nameBySku[p.sku] = p.name || '';
+            });
+            mapped = mapped.map(m =>
+              !m.product_name && m.remote_sku ? { ...m, product_name: nameBySku[m.remote_sku] ?? null } : m
+            );
+          }
+        } catch (e) {
+          console.warn('⚠️ product_name fallback by SKU failed', (e as any)?.message || e);
+        }
 
         setListings(mapped);
 
@@ -320,20 +429,29 @@ export default function MarketplacePricing() {
       });
     }
 
+    if (filters.diffFirst) {
+      result.sort((a, b) => {
+        const af = a.is_mapped && a.qty_app != null && a.qty_ebay !== a.qty_app ? 0 : 1;
+        const bf = b.is_mapped && b.qty_app != null && b.qty_ebay !== b.qty_app ? 0 : 1;
+        return af - bf;
+      });
+    }
+
     setFilteredListings(result);
   }, [listings, filters]);
 
-  // Prompt to sync quantities when listings updated and mappings exist
+  // Ouvrir la modale des différences automatiquement si des écarts existent
   useEffect(() => {
     if (!autoLinkAttempted) return;
-    const mismatches = listings.filter(
+    const miss = listings.filter(
       l => l.is_mapped && l.qty_app != null && l.remote_sku && l.qty_ebay !== l.qty_app
     );
-    if (mismatches.length > 0) {
-      setItemsToSync(
-        mismatches.map(l => ({ sku: l.remote_sku, quantity: l.qty_app as number }))
-      );
-      setShowQtySyncPrompt(true);
+    if (miss.length > 0) {
+      setDiffRows(miss);
+      const init: Record<string, boolean> = {};
+      miss.forEach(m => { if (m.remote_sku) init[m.remote_sku] = true; });
+      setSelectedDiff(init);
+      setShowDiffModal(true);
     }
   }, [listings, autoLinkAttempted]);
 
@@ -344,17 +462,6 @@ export default function MarketplacePricing() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  // Calcul du delta (EUR seulement)
-  const calculateDelta = (priceEur: number | null, internalPrice: number | null): number | null => {
-    if (priceEur == null || internalPrice == null) return null;
-    return priceEur - internalPrice;
-  };
-
-  const formatDelta = (delta: number | null) => {
-    if (delta === null) return <span className="text-gray-400">—</span>;
-    const color = delta > 0 ? 'text-green-600' : delta < 0 ? 'text-red-600' : 'text-gray-600';
-    return <span className={color}>{delta >= 0 ? '+' : ''}{delta.toFixed(2)} EUR</span>;
-  };
 
   // Actions
   const handleLinkClick = (remoteId: string, remoteSku: string) => {
@@ -569,6 +676,339 @@ export default function MarketplacePricing() {
     }
   };
 
+  // Utils
+  const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
+  const chunk = <T,>(arr: T[], size = 100) => {
+    const out: T[][] = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  };
+
+  // Charger toutes les pages une seule fois et conserver en mémoire
+  const handleLoadAllListings = async () => {
+    if (!selectedAccountId) return;
+    try {
+      setIsLoadingAll(true);
+      setToast({ message: 'Chargement de toutes les pages…', type: 'success' });
+
+      const limit = itemsPerPage;
+      // Première page pour connaître total
+      const params1 = new URLSearchParams({
+        provider: selectedProvider,
+        account_id: selectedAccountId,
+        q: filters.searchQuery,
+        // Toujours charger tout, pas uniquement les unmapped
+        only_unmapped: 'false',
+        status: filters.statusFilter,
+        page: '1',
+        limit: String(limit),
+        offset: '0'
+      });
+      const resp1 = await fetch(`/.netlify/functions/marketplaces-listings?${params1}`);
+      if (!resp1.ok) {
+        const t = await resp1.text();
+        throw new Error(`HTTP ${resp1.status} ${t.substring(0, 120)}`);
+      }
+      const js1 = await resp1.json();
+      const total = Number(js1.total || js1.count || 0);
+      const totalPages = Math.max(1, Math.ceil(total / limit));
+      setLoadingProgress({ open: true, current: 1, total: totalPages, done: false });
+
+      const mapBySku = new Map<string, PricingListing>();
+      // Map page 1
+      const page1Items: any[] = Array.isArray(js1.items) ? js1.items : [];
+      let mapped: PricingListing[] = page1Items.map((it: any) => ({
+        remote_id: it?.remote_id || '',
+        remote_sku: it?.remote_sku || '',
+        title: it?.title || '',
+        price: typeof it?.price_amount === 'number' ? it.price_amount : (it?.price_amount ? parseFloat(it.price_amount) : null),
+        price_currency: it?.price_currency || 'EUR',
+        price_eur: null,
+        internal_price: null,
+        product_id: it?.product_id || null,
+        product_name: null,
+        sync_status: ((): any => {
+          const s = (it?.status_sync || '').toString();
+          return s === 'ok' || s === 'pending' || s === 'failed' ? s : 'unmapped';
+        })(),
+        is_mapped: !!it?.product_id || false,
+        qty_ebay: typeof it?.qty_ebay === 'number' ? it.qty_ebay : (it?.qty_ebay ?? null),
+        qty_app: typeof it?.qty_app === 'number' ? it.qty_app : (it?.qty_app ?? null)
+      }));
+      mapped.forEach(m => { if (m.remote_sku) mapBySku.set(m.remote_sku, m); });
+
+      // Pages suivantes
+      for (let p = 2; p <= totalPages; p++) {
+        const offset = String((p - 1) * limit);
+        const params = new URLSearchParams({
+          provider: selectedProvider,
+          account_id: selectedAccountId,
+          q: filters.searchQuery,
+          only_unmapped: 'false',
+          status: filters.statusFilter,
+          page: String(p),
+          limit: String(limit),
+          offset
+        });
+        const resp = await fetch(`/.netlify/functions/marketplaces-listings?${params}`);
+        if (!resp.ok) {
+          const t = await resp.text();
+          console.warn(`Page ${p} failed: HTTP ${resp.status} ${t.substring(0, 120)}`);
+          await sleep(200);
+          continue;
+        }
+        const js = await resp.json();
+        const items: any[] = Array.isArray(js.items) ? js.items : [];
+        const mappedP: PricingListing[] = items.map((it: any) => ({
+          remote_id: it?.remote_id || '',
+          remote_sku: it?.remote_sku || '',
+          title: it?.title || '',
+          price: typeof it?.price_amount === 'number' ? it.price_amount : (it?.price_amount ? parseFloat(it.price_amount) : null),
+          price_currency: it?.price_currency || 'EUR',
+          price_eur: null,
+          internal_price: null,
+          product_id: it?.product_id || null,
+          product_name: null,
+          sync_status: ((): any => {
+            const s = (it?.status_sync || '').toString();
+            return s === 'ok' || s === 'pending' || s === 'failed' ? s : 'unmapped';
+          })(),
+          is_mapped: !!it?.product_id || false,
+          qty_ebay: typeof it?.qty_ebay === 'number' ? it.qty_ebay : (it?.qty_ebay ?? null),
+          qty_app: typeof it?.qty_app === 'number' ? it.qty_app : (it?.qty_app ?? null)
+        }));
+        mappedP.forEach(m => { if (m.remote_sku) mapBySku.set(m.remote_sku, m); });
+        // Throttle léger
+        setLoadingProgress(prev => ({ ...prev, current: Math.min(prev.total, p) }));
+        await sleep(150);
+      }
+
+      // Fusion finale + lookup noms produits
+      const all = Array.from(mapBySku.values());
+      try {
+        const ids = Array.from(new Set(all.map(m => m.product_id).filter((v): v is string => !!v)));
+        if (ids.length > 0) {
+          const { data: prodNames } = await supabase
+            .from('products')
+            .select('id,name')
+            .in('id', ids as any);
+          const nameById: Record<string, string> = {};
+          (prodNames || []).forEach((p: any) => {
+            if (p?.id) nameById[p.id] = p.name || '';
+          });
+          for (const m of all) {
+            if (m.product_id) m.product_name = nameById[m.product_id] ?? null;
+          }
+        }
+      } catch (e) {
+        console.warn('⚠️ product_name lookup (all) failed', (e as any)?.message || e);
+      }
+
+      setListings(all);
+      setTotalCount(all.length);
+      setUseAllLocal(true);
+      setLoadingProgress(prev => ({ ...prev, current: prev.total || all.length, done: true }));
+      setToast({ message: `Chargé: ${all.length} produits`, type: 'success' });
+    } catch (e: any) {
+      setToast({ message: `Erreur chargement: ${e.message || e}`, type: 'error' });
+    } finally {
+      setIsLoadingAll(false);
+    }
+  };
+
+  // Sync page courante: pousse qty_app -> eBay pour la page affichée
+  const handleSyncPage = async () => {
+    if (!selectedAccountId) return;
+    const start = (currentPage - 1) * itemsPerPage;
+    const end = Math.min(currentPage * itemsPerPage, filteredListings.length);
+    const pageRows = filteredListings.slice(start, end);
+    const items = pageRows
+      .filter(l => l.remote_sku && typeof l.qty_app === 'number')
+      .map(l => ({ sku: l.remote_sku, quantity: l.qty_app as number }));
+
+    if (items.length === 0) {
+      setToast({ message: 'Aucune quantité à pousser sur cette page', type: 'error' });
+      return;
+    }
+    await pushQtyBatched(items);
+  };
+
+  // Sync tout: pousse qty_app -> eBay pour tout le filtré affiché (ou tout)
+  const handleSyncAll = async () => {
+    if (!selectedAccountId) return;
+    const items = filteredListings
+      .filter(l => l.remote_sku && typeof l.qty_app === 'number')
+      .map(l => ({ sku: l.remote_sku, quantity: l.qty_app as number }));
+    if (items.length === 0) {
+      setToast({ message: 'Aucune quantité à pousser', type: 'error' });
+      return;
+    }
+    await pushQtyBatched(items);
+  };
+
+  const pushQtyBatched = async (items: { sku: string; quantity: number }[]) => {
+    try {
+      setIsBulkSyncing(true);
+      setToast({ message: `Sync quantités… (${items.length})`, type: 'success' });
+      const batches = chunk(items, 100);
+      for (let i = 0; i < batches.length; i++) {
+        const resp = await fetch('/.netlify/functions/marketplaces-stock-update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ account_id: selectedAccountId, items: batches[i] })
+        });
+        if (!resp.ok) {
+          const t = await resp.text();
+          throw new Error(`HTTP ${resp.status} ${t.substring(0, 120)}`);
+        }
+        await sleep(100);
+      }
+      const skuSet = new Set(items.map(i => i.sku));
+      setListings(prev => prev.map(l => (skuSet.has(l.remote_sku) ? { ...l, qty_ebay: l.qty_app ?? l.qty_ebay } : l)));
+      setToast({ message: `Quantités mises à jour (${items.length})`, type: 'success' });
+    } catch (e: any) {
+      setToast({ message: `Erreur sync: ${e.message || e}`, type: 'error' });
+    } finally {
+      setIsBulkSyncing(false);
+    }
+  };
+
+  const handleReloadFromEbay = () => {
+    setUseAllLocal(false);
+    setReloadToken(x => x + 1);
+    setToast({ message: 'Rechargement depuis eBay…', type: 'success' });
+  };
+
+  const closeProgressModal = () => {
+    setLoadingProgress({ open: false, current: 0, total: 0, done: false });
+  };
+
+  const openUnmappedModal = () => {
+    const rows = listings.filter(l => !l.is_mapped && l.remote_sku);
+    setUnmappedRows(rows);
+    const init: Record<string, boolean> = {};
+    rows.forEach(r => { if (r.remote_sku) init[r.remote_sku] = true; });
+    setSelectedUnmapped(init);
+    setShowUnmappedModal(true);
+  };
+
+  const selectAllUnmapped = () => {
+    const next: Record<string, boolean> = {};
+    unmappedRows.forEach(r => { if (r.remote_sku) next[r.remote_sku] = true; });
+    setSelectedUnmapped(next);
+  };
+
+  const clearAllUnmapped = () => {
+    setSelectedUnmapped({});
+  };
+
+  const linkSelectedUnmappedBySku = async () => {
+    try {
+      const items = Object.keys(selectedUnmapped)
+        .filter(sku => selectedUnmapped[sku])
+        .map(sku => {
+          const row = unmappedRows.find(r => r.remote_sku === sku);
+          return row ? { remote_sku: sku, remote_id: row.remote_id } : null;
+        })
+        .filter(Boolean) as { remote_sku: string; remote_id: string }[];
+
+      if (items.length === 0) {
+        setToast({ message: 'Aucune ligne sélectionnée', type: 'error' });
+        return;
+      }
+
+      const { data: { session } } = await supabase.auth.getSession();
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session?.access_token || ''}`
+      };
+
+      const payload = {
+        action: 'bulk_link_by_sku',
+        provider: selectedProvider,
+        account_id: selectedAccountId,
+        items
+      };
+
+      const resp = await fetch('/.netlify/functions/marketplaces-mapping', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify(payload)
+      });
+
+      const body = await resp.json().catch(() => ({} as any));
+      if (!resp.ok) {
+        throw new Error(body?.error || `HTTP ${resp.status}`);
+      }
+
+      const linked = Number(body?.linked || 0);
+      const review = Array.isArray(body?.needs_review) ? body.needs_review : [];
+      setToast({ message: `Liens par SKU: ${linked} lié(s), ${review.length} à revoir`, type: linked > 0 ? 'success' : 'error' });
+      setShowUnmappedModal(false);
+
+      // Rafraîchir pour récupérer product_id et qty_app
+      setReloadToken(x => x + 1);
+    } catch (e: any) {
+      setToast({ message: `Erreur liaison: ${e.message || e}`, type: 'error' });
+    }
+  };
+
+  const openDiffModal = () => {
+    const miss = listings.filter(
+      l => l.is_mapped && l.qty_app != null && l.remote_sku && l.qty_ebay !== l.qty_app
+    );
+    setDiffRows(miss);
+    const init: Record<string, boolean> = {};
+    miss.forEach(m => { if (m.remote_sku) init[m.remote_sku] = true; });
+    setSelectedDiff(init);
+    if (miss.length > 0) setShowDiffModal(true);
+    else setToast({ message: 'Aucune différence de quantités détectée', type: 'success' });
+  };
+
+  const sendSelectedDiff = async () => {
+    const selectedSkus = Object.keys(selectedDiff).filter(s => selectedDiff[s]);
+    if (selectedSkus.length === 0) {
+      setToast({ message: 'Aucune ligne sélectionnée', type: 'error' });
+      return;
+    }
+    const bySku = new Map(diffRows.map(r => [r.remote_sku, r]));
+    const items = selectedSkus
+      .map(s => {
+        const row = bySku.get(s);
+        return row && typeof row.qty_app === 'number' ? { sku: s, quantity: row.qty_app } : null;
+      })
+      .filter(Boolean) as { sku: string; quantity: number }[];
+
+    await pushQtyBatched(items);
+    setShowDiffModal(false);
+    const miss = listings.filter(
+      l => l.is_mapped && l.qty_app != null && l.remote_sku && l.qty_ebay !== l.qty_app
+    );
+    setDiffRows(miss);
+    const init: Record<string, boolean> = {};
+    miss.forEach(m => { if (m.remote_sku) init[m.remote_sku] = true; });
+    setSelectedDiff(init);
+  };
+
+  const selectAllDiff = () => {
+    const next: Record<string, boolean> = {};
+    diffRows.forEach(r => { if (r.remote_sku) next[r.remote_sku] = true; });
+    setSelectedDiff(next);
+  };
+
+  const clearAllDiff = () => {
+    setSelectedDiff({});
+  };
+
+  const handleCreateBySku = (sku: string) => {
+    const row = listings.find(l => l.remote_sku === sku);
+    if (!row?.remote_id) {
+      setToast({ message: `Impossible de créer: SKU ${sku} introuvable`, type: 'error' });
+      return;
+    }
+    handleCreate(row.remote_id);
+  };
+
   const handleResolveBySku = (sku: string) => {
     // Ouvre la modale de lien sur la première ligne correspondante
     const row = listings.find(l => l.remote_sku === sku && !l.is_mapped);
@@ -682,6 +1122,15 @@ export default function MarketplacePricing() {
             />
             Non-mappés d'abord
           </label>
+          <label className="flex items-center gap-2 text-sm whitespace-nowrap">
+            <input
+              type="checkbox"
+              checked={filters.diffFirst}
+              onChange={(e) => setFilters({ ...filters, diffFirst: e.target.checked })}
+              className="rounded"
+            />
+            Différences d'abord
+          </label>
           <select
             value={filters.statusFilter}
             onChange={(e) => setFilters({ ...filters, statusFilter: e.target.value as any })}
@@ -727,12 +1176,21 @@ export default function MarketplacePricing() {
                        it?.status || '—'}
                     </td>
                     <td className="px-2 py-1">
-                      <button
-                        onClick={() => handleResolveBySku(it?.remote_sku)}
-                        className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
-                      >
-                        Lier…
-                      </button>
+                      {it?.status === 'not_found' ? (
+                        <button
+                          onClick={() => handleCreateBySku(it?.remote_sku)}
+                          className="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
+                        >
+                          Créer l’article
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleResolveBySku(it?.remote_sku)}
+                          className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
+                        >
+                          Lier…
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -746,25 +1204,52 @@ export default function MarketplacePricing() {
       {selectedAccountId && (
         <div className="flex items-center gap-2">
           <button
-            disabled
-            title="Fonctionnalité bientôt disponible"
-            className="px-4 py-2 bg-gray-200 text-gray-500 rounded-md cursor-not-allowed"
+            onClick={handleReloadFromEbay}
+            disabled={isLoadingListings}
+            className="px-4 py-2 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200"
+            title="Recharger en mode serveur depuis eBay"
           >
-            Sync sélection
+            Recharger depuis eBay
           </button>
           <button
-            disabled
-            title="Fonctionnalité bientôt disponible"
-            className="px-4 py-2 bg-gray-200 text-gray-500 rounded-md cursor-not-allowed"
+            onClick={handleLoadAllListings}
+            disabled={isLoadingAll || isLoadingListings}
+            className={`px-4 py-2 rounded-md ${isLoadingAll ? 'bg-gray-200 text-gray-500' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+            title="Charger toutes les pages dans la mémoire (pagination client)"
           >
-            Sync page
+            {isLoadingAll ? 'Chargement…' : 'Charger tout (toutes pages)'}
           </button>
           <button
-            disabled
-            title="Fonctionnalité bientôt disponible"
-            className="px-4 py-2 bg-gray-200 text-gray-500 rounded-md cursor-not-allowed"
+            onClick={openUnmappedModal}
+            disabled={isLoadingListings || listings.length === 0}
+            className="px-4 py-2 rounded-md bg-amber-600 text-white hover:bg-amber-700"
+            title="Afficher les produits non mappés et lier en masse par SKU"
           >
-            Sync tout
+            {`Non mappés (${listings.filter(l => !l.is_mapped).length})`}
+          </button>
+          <button
+            onClick={openDiffModal}
+            disabled={isLoadingListings || listings.length === 0}
+            className="px-4 py-2 rounded-md bg-yellow-600 text-white hover:bg-yellow-700"
+            title="Afficher uniquement les produits avec différences de quantités"
+          >
+            Différences
+          </button>
+          <button
+            onClick={handleSyncPage}
+            disabled={isBulkSyncing || isLoadingListings}
+            className={`px-4 py-2 rounded-md ${isBulkSyncing ? 'bg-gray-200 text-gray-500' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}
+            title="Pousser les quantités de la page courante vers eBay"
+          >
+            {isBulkSyncing ? 'Sync…' : 'Sync page'}
+          </button>
+          <button
+            onClick={handleSyncAll}
+            disabled={isBulkSyncing || isLoadingListings}
+            className={`px-4 py-2 rounded-md ${isBulkSyncing ? 'bg-gray-200 text-gray-500' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}
+            title="Pousser les quantités de tout le filtré vers eBay"
+          >
+            {isBulkSyncing ? 'Sync…' : 'Sync tout'}
           </button>
         </div>
       )}
@@ -799,7 +1284,7 @@ export default function MarketplacePricing() {
                         Produit/SKU
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Prix interne
+                        Nom produit (app)
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Prix eBay (EUR)
@@ -809,9 +1294,6 @@ export default function MarketplacePricing() {
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Qté app
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Δ
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Statut sync
@@ -825,7 +1307,7 @@ export default function MarketplacePricing() {
                     {filteredListings
                       .map(listing => (
                         <tr
-                          key={listing.remote_id}
+                          key={listing.remote_id || listing.remote_sku}
                           className={!listing.is_mapped ? 'bg-orange-50' : ''}
                         >
                           <td className="px-4 py-3">
@@ -837,10 +1319,11 @@ export default function MarketplacePricing() {
                             </div>
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-700">
-                            {listing.internal_price != null
-                              ? `${listing.internal_price.toFixed(2)} EUR`
-                              : <span className="text-gray-400">—</span>
-                            }
+                            {listing.product_name ? (
+                              <span>{listing.product_name}</span>
+                            ) : (
+                              <span className="text-gray-400">—</span>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-700">
                             {listing.price != null
@@ -859,9 +1342,6 @@ export default function MarketplacePricing() {
                               ? listing.qty_app
                               : <span className="text-gray-400">—</span>
                             }
-                          </td>
-                          <td className="px-4 py-3 text-sm">
-                            {formatDelta(calculateDelta(listing.price_eur, listing.internal_price))}
                           </td>
                           <td className="px-4 py-3">
                             {!listing.is_mapped ? (
@@ -895,8 +1375,9 @@ export default function MarketplacePricing() {
                               )}
                               <button
                                 onClick={() => handleCreate(listing.remote_id)}
-                                disabled={actionLoading[listing.remote_id]}
+                                disabled={actionLoading[listing.remote_id] || (listing.remote_id?.startsWith('inv:') ?? false)}
                                 className="px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                title={listing.remote_id?.startsWith('inv:') ? 'Pas d’offre eBay existante (ligne inventaire)' : 'Créer'}
                               >
                                 Créer
                               </button>
@@ -987,26 +1468,161 @@ export default function MarketplacePricing() {
         </div>
       )}
 
-      {/* Modal Sync quantités */}
-      {showQtySyncPrompt && itemsToSync.length > 0 && (
+      {/* Modal Différences de quantités */}
+      {showDiffModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 w-full max-w-md shadow-xl">
-            <h2 className="text-lg font-semibold mb-3">Mettre à jour les quantités sur eBay</h2>
-            <p className="text-sm text-gray-600 mb-4">
-              {itemsToSync.length} produit(s) ont une différence entre Qté app et Qté eBay. Voulez-vous pousser les quantités de l'app vers eBay maintenant ?
-            </p>
-            <div className="flex justify-end gap-2">
+          <div className="bg-white rounded-lg p-6 w-full max-w-3xl shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Produits avec différences de quantités</h2>
+              <button onClick={() => setShowDiffModal(false)} className="text-gray-500 hover:text-gray-700">✕</button>
+            </div>
+            <div className="flex items-center gap-2 mb-3">
+              <button onClick={selectAllDiff} className="px-3 py-1 border rounded">Tout sélectionner</button>
+              <button onClick={clearAllDiff} className="px-3 py-1 border rounded">Tout désélectionner</button>
+            </div>
+            <div className="max-h-[60vh] overflow-auto border rounded">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-3 py-2 text-left">SKU</th>
+                    <th className="px-3 py-2 text-left">Nom produit (app)</th>
+                    <th className="px-3 py-2 text-left">Qté eBay</th>
+                    <th className="px-3 py-2 text-left">Qté app</th>
+                    <th className="px-3 py-2 text-left">Sélection</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {diffRows.map(r => (
+                    <tr key={r.remote_id} className="border-t">
+                      <td className="px-3 py-2 font-mono">{r.remote_sku}</td>
+                      <td className="px-3 py-2">{r.product_name || r.title || '—'}</td>
+                      <td className="px-3 py-2">{r.qty_ebay ?? '—'}</td>
+                      <td className="px-3 py-2">{r.qty_app ?? '—'}</td>
+                      <td className="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedDiff[r.remote_sku]}
+                          onChange={(e) => setSelectedDiff(prev => ({ ...prev, [r.remote_sku]: e.target.checked }))}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                  {diffRows.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="px-3 py-4 text-center text-gray-500">Aucune différence détectée</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
               <button
-                onClick={() => setShowQtySyncPrompt(false)}
+                onClick={() => setShowDiffModal(false)}
                 className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
               >
-                Plus tard
+                Fermer
               </button>
               <button
-                onClick={confirmBulkQtySync}
+                onClick={sendSelectedDiff}
                 className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700"
               >
-                Mettre à jour maintenant
+                Envoyer vers eBay ({Object.values(selectedDiff).filter(Boolean).length})
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Progress Chargement */}
+      {loadingProgress.open && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md shadow-xl">
+            <h2 className="text-lg font-semibold mb-2">Chargement de toutes les pages</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Pages {Math.min(loadingProgress.current, loadingProgress.total)} / {loadingProgress.total}
+            </p>
+            <div className="w-full bg-gray-200 rounded h-3 overflow-hidden mb-4">
+              <div
+                className="bg-blue-600 h-3"
+                style={{ width: `${Math.min(100, Math.round((Math.min(loadingProgress.current, loadingProgress.total) / Math.max(1, loadingProgress.total)) * 100))}%` }}
+              />
+            </div>
+            <div className="flex justify-end">
+              {loadingProgress.done ? (
+                <button
+                  onClick={closeProgressModal}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                >
+                  OK
+                </button>
+              ) : (
+                <button
+                  disabled
+                  className="px-4 py-2 bg-gray-200 text-gray-500 rounded-md cursor-not-allowed"
+                >
+                  Chargement…
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Non mappés (lien en masse par SKU) */}
+      {showUnmappedModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-3xl shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Produits non mappés</h2>
+              <button onClick={() => setShowUnmappedModal(false)} className="text-gray-500 hover:text-gray-700">✕</button>
+            </div>
+            <div className="flex items-center gap-2 mb-3">
+              <button onClick={selectAllUnmapped} className="px-3 py-1 border rounded">Tout sélectionner</button>
+              <button onClick={clearAllUnmapped} className="px-3 py-1 border rounded">Tout désélectionner</button>
+            </div>
+            <div className="max-h-[60vh] overflow-auto border rounded">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-3 py-2 text-left">SKU</th>
+                    <th className="px-3 py-2 text-left">Nom (app)</th>
+                    <th className="px-3 py-2 text-left">Sélection</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {unmappedRows.map(r => (
+                    <tr key={r.remote_id} className="border-t">
+                      <td className="px-3 py-2 font-mono">{r.remote_sku}</td>
+                      <td className="px-3 py-2">{r.product_name || r.title || '—'}</td>
+                      <td className="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedUnmapped[r.remote_sku]}
+                          onChange={(e) => setSelectedUnmapped(prev => ({ ...prev, [r.remote_sku]: e.target.checked }))}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                  {unmappedRows.length === 0 && (
+                    <tr>
+                      <td colSpan={3} className="px-3 py-4 text-center text-gray-500">Aucun non mappé</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setShowUnmappedModal(false)}
+                className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
+              >
+                Fermer
+              </button>
+              <button
+                onClick={linkSelectedUnmappedBySku}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+              >
+                Lier sélection (SKU)
               </button>
             </div>
           </div>
