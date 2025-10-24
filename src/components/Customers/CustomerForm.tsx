@@ -221,6 +221,36 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
         }
       }
 
+      // Persist local draft addresses created before the first save (if any)
+      if (savedCustomerId) {
+        const toPlain = (a: any) => ({
+          line1: a.line1,
+          line2: a.line2 || '',
+          zip: a.zip,
+          city: a.city,
+          country: a.country || 'France',
+          region: (a as any).region || regionFromPostalCode(a.zip),
+          is_default: !!a.is_default
+        });
+        const persistList = async (arr: any[], type: 'billing' | 'shipping') => {
+          for (const a of arr) {
+            try {
+              await addAddress({
+                customer_id: savedCustomerId,
+                address_type: type,
+                ...toPlain(a)
+              } as any);
+            } catch (e) {
+              console.warn('persist draft address failed', type, e);
+            }
+          }
+        };
+        const localBills = (billingAddresses as any[]).filter(a => !a?.id || String(a.id).startsWith('local-'));
+        const localShips = (shippingAddresses as any[]).filter(a => !a?.id || String(a.id).startsWith('local-'));
+        if (localBills.length > 0) await persistList(localBills, 'billing');
+        if (localShips.length > 0) await persistList(localShips, 'shipping');
+      }
+
       if (onSaved && savedCustomerId) {
         onSaved(savedCustomerId);
       }
@@ -231,45 +261,82 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
   
   // Handle adding a new address
   const handleAddAddress = async () => {
-    if (!customerId) {
-      alert('Veuillez d\'abord enregistrer le client');
-      return;
-    }
-    
     if (!newAddress.line1 || !newAddress.zip || !newAddress.city) {
       alert('Veuillez remplir tous les champs obligatoires');
       return;
     }
-    
-    try {
-      const payload: any = {
-        line1: newAddress.line1,
-        line2: newAddress.line2,
-        zip: newAddress.zip,
-        city: newAddress.city,
-        country: newAddress.country,
-        region: newAddress.region || regionFromPostalCode(newAddress.zip),
-        is_default: newAddress.is_default
-      };
 
+    // Common payload
+    const payload: any = {
+      line1: newAddress.line1,
+      line2: newAddress.line2,
+      zip: newAddress.zip,
+      city: newAddress.city,
+      country: newAddress.country,
+      region: newAddress.region || regionFromPostalCode(newAddress.zip),
+      is_default: newAddress.is_default
+    };
+
+    // If the customer is not yet saved, work in "draft" mode locally
+    if (!customerId) {
       if (editAddressId) {
-        // Update existing address
+        if (newAddressType === 'billing') {
+          setBillingAddresses(prev =>
+            prev.map(a => (a.id === editAddressId ? ({ ...a, ...payload, address_type: 'billing' } as any) : a))
+          );
+        } else {
+          setShippingAddresses(prev =>
+            prev.map(a => (a.id === editAddressId ? ({ ...a, ...payload, address_type: 'shipping' } as any) : a))
+          );
+        }
+      } else {
+        const tempId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const entry = { id: tempId, address_type: newAddressType, ...payload } as any;
+        if (newAddressType === 'billing') {
+          setBillingAddresses(prev => {
+            const arr = newAddress.is_default ? prev.map(x => ({ ...x, is_default: false })) : prev;
+            return [...arr, entry];
+          });
+        } else {
+          setShippingAddresses(prev => {
+            const arr = newAddress.is_default ? prev.map(x => ({ ...x, is_default: false })) : prev;
+            return [...arr, entry];
+          });
+        }
+      }
+
+      // Reset form and close modal
+      setNewAddress({
+        line1: '',
+        line2: '',
+        zip: '',
+        city: '',
+        country: 'France',
+        region: '',
+        is_default: false
+      });
+      setEditAddressId(null);
+      setShowNewAddressForm(false);
+      return;
+    }
+
+    // Persisted customer: use RPCs/services
+    try {
+      if (editAddressId) {
         const updated = await updateAddress(editAddressId, payload);
         if (updated) {
           if (newAddressType === 'billing') {
-            setBillingAddresses(prev => prev.map(a => (a.id === editAddressId ? { ...a, ...updated } as any : a)));
+            setBillingAddresses(prev => prev.map(a => (a.id === editAddressId ? ({ ...a, ...updated } as any) : a)));
           } else {
-            setShippingAddresses(prev => prev.map(a => (a.id === editAddressId ? { ...a, ...updated } as any : a)));
+            setShippingAddresses(prev => prev.map(a => (a.id === editAddressId ? ({ ...a, ...updated } as any) : a)));
           }
         }
       } else {
-        // Insert new address
         const addressData = {
           customer_id: customerId,
           address_type: newAddressType,
           ...payload
         } as any;
-
         const newAddr = await addAddress(addressData);
         if (newAddr) {
           if (newAddressType === 'billing') {
@@ -280,7 +347,7 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
         }
       }
 
-      // Reset form
+      // Reset and close
       setNewAddress({
         line1: '',
         line2: '',
@@ -299,43 +366,55 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
   
   // Handle deleting an address
   const handleDeleteAddress = async (id: string, type: 'billing' | 'shipping') => {
-    if (window.confirm('Êtes-vous sûr de vouloir supprimer cette adresse ?')) {
-      try {
-        await deleteAddress(id);
-        
-        // Update the appropriate address list
-        if (type === 'billing') {
-          setBillingAddresses(prev => prev.filter(addr => addr.id !== id));
-        } else {
-          setShippingAddresses(prev => prev.filter(addr => addr.id !== id));
-        }
-      } catch (err) {
-        console.error('Error deleting address:', err);
+    if (!window.confirm('Êtes-vous sûr de vouloir supprimer cette adresse ?')) return;
+
+    // Draft/local address (before save) or temp id
+    if (!customerId || String(id).startsWith('local-')) {
+      if (type === 'billing') {
+        setBillingAddresses(prev => prev.filter(addr => addr.id !== id));
+      } else {
+        setShippingAddresses(prev => prev.filter(addr => addr.id !== id));
       }
+      return;
+    }
+
+    try {
+      await deleteAddress(id);
+      if (type === 'billing') {
+        setBillingAddresses(prev => prev.filter(addr => addr.id !== id));
+      } else {
+        setShippingAddresses(prev => prev.filter(addr => addr.id !== id));
+      }
+    } catch (err) {
+      console.error('Error deleting address:', err);
     }
   };
   
   // Handle setting an address as default
   const handleSetDefaultAddress = async (id: string, type: 'billing' | 'shipping') => {
-    if (!customerId) return;
-    
-    try {
-      await setDefaultAddress(customerId, id, type);
-      
-      // Update the appropriate address list
+    // Local/draft: toggle in memory
+    if (!customerId || String(id).startsWith('local-')) {
       if (type === 'billing') {
-        setBillingAddresses(prev => 
-          prev.map(addr => ({
-            ...addr,
-            is_default: addr.id === id
-          }))
+        setBillingAddresses(prev =>
+          prev.map(addr => ({ ...addr, is_default: addr.id === id }))
         );
       } else {
-        setShippingAddresses(prev => 
-          prev.map(addr => ({
-            ...addr,
-            is_default: addr.id === id
-          }))
+        setShippingAddresses(prev =>
+          prev.map(addr => ({ ...addr, is_default: addr.id === id }))
+        );
+      }
+      return;
+    }
+
+    try {
+      await setDefaultAddress(customerId, id, type);
+      if (type === 'billing') {
+        setBillingAddresses(prev =>
+          prev.map(addr => ({ ...addr, is_default: addr.id === id }))
+        );
+      } else {
+        setShippingAddresses(prev =>
+          prev.map(addr => ({ ...addr, is_default: addr.id === id }))
         );
       }
     } catch (err) {
@@ -582,8 +661,8 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
           </div>
         </div>
         
-        {/* Only show addresses section if customer is saved (has an ID) */}
-        {customerId && (
+        {/* Always show address sections (support draft addresses before save) */}
+        {true && (
           <>
             {/* Billing Addresses */}
             <div className="bg-white rounded-lg shadow p-6">
@@ -869,7 +948,7 @@ export const CustomerForm: React.FC<CustomerFormProps> = ({ customerId, onSaved 
               <div className="flex justify-end space-x-3 mt-6">
                 <button
                   type="button"
-                  onClick={() => setShowNewAddressForm(false)}
+                  onClick={() => { setEditAddressId(null); setShowNewAddressForm(false); }}
                   className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
                 >
                   Annuler
