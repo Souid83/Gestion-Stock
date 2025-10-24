@@ -74,6 +74,12 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
     total_price: 0
   });
 
+  // Contexte du document
+  const [docCustomerType, setDocCustomerType] = useState<'pro' | 'particulier'>('particulier');
+  const [docVatRegime, setDocVatRegime] = useState<'normal' | 'margin'>('normal');
+  const [selectedProductForNewItem, setSelectedProductForNewItem] = useState<ProductWithStock | null>(null);
+  const [viewAfterSave, setViewAfterSave] = useState<boolean>(false);
+
   // Quick customer creation
   const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
   const [newCustomer, setNewCustomer] = useState<any>({
@@ -227,10 +233,11 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
     return () => { cancelled = true; };
   }, [productSearchTerm]);
 
-  // Toggle dropdown visibility in sync with search results
+  // Toggle dropdown visibility in sync with search results (filtered by VAT regime)
   useEffect(() => {
-    setShowProductDropdown(productSearchTerm.trim() !== '' && filteredProducts.length > 0);
-  }, [productSearchTerm, filteredProducts]);
+    const list = filteredProducts.filter((p: any) => (p as any).vat_type === docVatRegime);
+    setShowProductDropdown(productSearchTerm.trim() !== '' && list.length > 0);
+  }, [productSearchTerm, filteredProducts, docVatRegime]);
   
   // Calculate totals when items change
   useEffect(() => {
@@ -266,6 +273,9 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
     console.log('Customer selected:', customer);
     setSelectedCustomer(customer);
     setFormData(prev => ({ ...prev, customer_id: customer.id }));
+    // Type doc pré-rempli depuis le client choisi
+    const cg = ((customer as any)?.customer_group || '').toLowerCase() === 'pro' ? 'pro' : 'particulier';
+    setDocCustomerType(cg as 'pro' | 'particulier');
     setCustomerSearchTerm('');
     setShowCustomerDropdown(false);
     
@@ -302,20 +312,23 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
   const handleProductSelect = (product: ProductWithStock) => {
     console.log('Product selected:', product);
 
-    // Pricing rules:
-    // - TVA normale: retail_price est HT en base => on prend HT et on applique le taux (champ tax_rate de la ligne)
-    // - TVA sur marge: retail_price est TVM (prix final) => pas de double TVA sur la ligne: tax_rate=0, unit_price=TVM
-    const isMargin = (product as any).vat_type === 'margin';
-    const unitHTOrTVM = Number(product.retail_price || 0);
+    // Règles prix selon type client et régime TVA du document
+    const isMargin = docVatRegime === 'margin';
+    const base =
+      docCustomerType === 'pro'
+        ? Number((product as any).pro_price || 0)
+        : Number(product.retail_price || 0);
+    const unit = base;
     const taxRate = isMargin ? 0 : 20;
 
+    setSelectedProductForNewItem(product);
     setNewItem({
       product_id: product.id,
       description: product.name,
       quantity: 1,
-      unit_price: unitHTOrTVM,
+      unit_price: unit,
       tax_rate: taxRate,
-      total_price: unitHTOrTVM
+      total_price: unit
     });
 
     setProductSearchTerm('');
@@ -463,6 +476,8 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
       e.preventDefault();
     }
     console.log('Submitting form with data:', formData);
+    const openAfter = viewAfterSave;
+    if (viewAfterSave) setViewAfterSave(false);
 
     if (!formData.customer_id) {
       // Try to create a customer on the fly if quick form has a name
@@ -573,11 +588,17 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
 
         console.log('Invoice updated successfully');
 
-        // Call onSaved callback if provided
-        if (onSaved) {
+        // Post-save navigation
+        if (openAfter) {
+          try {
+            sessionStorage.setItem('viewInvoiceId', invoiceId);
+          } catch {}
+          if ((window as any).__setCurrentPage) {
+            (window as any).__setCurrentPage('invoice-detail');
+          }
+        } else if (onSaved) {
           onSaved(invoiceId);
         } else {
-          // Default behavior: redirect to invoice list
           console.log('Redirecting to invoice list');
           if ((window as any).__setCurrentPage) {
             (window as any).__setCurrentPage('invoices-list');
@@ -629,11 +650,17 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
 
         console.log('Invoice and items saved successfully');
 
-        // Call onSaved callback if provided
-        if (onSaved) {
+        // Post-save navigation
+        if (openAfter) {
+          try {
+            sessionStorage.setItem('viewInvoiceId', newInvoiceId);
+          } catch {}
+          if ((window as any).__setCurrentPage) {
+            (window as any).__setCurrentPage('invoice-detail');
+          }
+        } else if (onSaved) {
           onSaved(newInvoiceId);
         } else {
-          // Default behavior: redirect to invoice list
           console.log('Redirecting to invoice list');
           if ((window as any).__setCurrentPage) {
             (window as any).__setCurrentPage('invoices-list');
@@ -692,6 +719,16 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
           >
             <Save size={18} />
             {isLoading ? 'Enregistrement...' : 'Enregistrer'}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setViewAfterSave(true); handleSubmit(); }}
+            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-md hover:bg-emerald-700"
+            disabled={isLoading}
+            title="Enregistrer puis ouvrir la visualisation"
+          >
+            <Save size={18} />
+            {isLoading ? 'Ouverture…' : 'Enregistrer et visualiser'}
           </button>
         </div>
       </div>
@@ -971,6 +1008,37 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
               </select>
             </div>
 
+            {/* Type de client du document */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Type de client du document
+              </label>
+              <select
+                value={docCustomerType}
+                onChange={(e) => setDocCustomerType((e.target.value as 'pro' | 'particulier'))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="pro">Professionnel</option>
+                <option value="particulier">Particulier</option>
+              </select>
+            </div>
+
+            {/* Régime TVA du document */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Régime TVA du document
+              </label>
+              <select
+                value={docVatRegime}
+                onChange={(e) => setDocVatRegime((e.target.value as 'normal' | 'margin'))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                title="Une facture ne peut pas mélanger les régimes de TVA"
+              >
+                <option value="normal">Normale</option>
+                <option value="margin">Marge</option>
+              </select>
+            </div>
+
             {/* Document Type */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -1181,24 +1249,31 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                 {showProductDropdown && filteredProducts.length > 0 && (
                   <div className="absolute z-10 mt-1 w-full bg-white shadow-lg rounded-md max-h-60 overflow-auto">
                     <ul className="py-1">
-                      {filteredProducts.map(product => (
-                        <li 
-                          key={product.id}
-                          className="px-4 py-2 hover:bg-gray-100 cursor-pointer"
-                          onClick={() => handleProductSelect(product)}
-                        >
-                          <div className="font-medium">{product.name}</div>
-                          <div className="text-sm text-gray-500">SKU: {product.sku}</div>
-                          <div className="text-sm text-gray-500">
-                            Prix: {formatCurrency(product.retail_price || 0)}
-                            {product.stock !== undefined && (
-                              <span className={`ml-2 ${product.stock > 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                Stock: {product.stock}
-                              </span>
-                            )}
-                          </div>
-                        </li>
-                      ))}
+                      {filteredProducts
+                        .filter((p: any) => (p as any).vat_type === docVatRegime)
+                        .map(product => (
+                          <li 
+                            key={product.id}
+                            className="px-4 py-2 hover:bg-gray-100 cursor-pointer"
+                            onClick={() => handleProductSelect(product)}
+                          >
+                            <div className="font-medium">{product.name}</div>
+                            <div className="text-sm text-gray-500">SKU: {product.sku}</div>
+                            <div className="text-sm text-gray-500">
+                              Prix: {formatCurrency(
+                                (docCustomerType === 'pro'
+                                  ? (product as any).pro_price || 0
+                                  : product.retail_price || 0
+                                )
+                              )}
+                              {product.stock !== undefined && (
+                                <span className={`ml-2 ${product.stock > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                  Stock: {product.stock}
+                                </span>
+                              )}
+                            </div>
+                          </li>
+                        ))}
                     </ul>
                   </div>
                 )}
@@ -1246,7 +1321,7 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
               {/* Unit Price */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Prix unitaire HT <span className="text-red-500">*</span>
+                  Prix unitaire {docVatRegime === 'margin' ? 'TVM' : 'HT'} <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="number"
@@ -1264,6 +1339,25 @@ export const InvoiceForm: React.FC<InvoiceFormProps> = ({ invoiceId, onSaved }) 
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                   required
                 />
+                {/* Marge live */}
+                {selectedProductForNewItem && (
+                  <div className="mt-1 text-xs text-gray-600">
+                    {(() => {
+                      const achat = Number((selectedProductForNewItem as any).purchase_price_with_fees || 0);
+                      const pu = Number(newItem.unit_price || 0);
+                      if (achat > 0 && pu > 0) {
+                        const margeEuro = docVatRegime === 'margin' ? (pu - achat) / 1.2 : (pu - achat);
+                        const margePct = achat > 0 ? (margeEuro / achat) * 100 : 0;
+                        return (
+                          <span>
+                            Marge: {margePct.toFixed(1)}% ({formatCurrency(margeEuro)})
+                          </span>
+                        );
+                      }
+                      return <span>Marge: —</span>;
+                    })()}
+                  </div>
+                )}
               </div>
               
               {/* Tax Rate */}
