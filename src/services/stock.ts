@@ -179,8 +179,8 @@ export async function getSharedStockIdFromSku(sku: string): Promise<string | nul
  */
 export async function syncEbayForProductsFromEbayStock(
   parentIds: string[],
-  opts?: { ebayStockIds?: string[]; ebayStockName?: string }
-): Promise<{ success: boolean; pushed: number; error?: string }> {
+  opts?: { ebayStockIds?: string[]; ebayStockName?: string; dryRun?: boolean }
+): Promise<{ success: boolean; pushed: number; failed?: number; error?: string; summary?: string }> {
   try {
     const pushedSkus = new Set<string>();
     if (!Array.isArray(parentIds) || parentIds.length === 0) {
@@ -311,6 +311,7 @@ export async function syncEbayForProductsFromEbayStock(
     let totalUpdated = 0;
     let totalFailed = 0;
     let sawTokenExpired = false;
+    const detailLines: string[] = [];
 
     const accountIds = Object.keys(byAccount);
     if (accountIds.length === 0) {
@@ -324,7 +325,7 @@ export async function syncEbayForProductsFromEbayStock(
           const resp = await fetch('/.netlify/functions/marketplaces-stock-update', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ account_id: accId, items: chunk })
+            body: JSON.stringify({ account_id: accId, items: chunk, dry_run: Boolean(opts?.dryRun) })
           });
 
           const raw = await resp.text().catch(() => '');
@@ -340,15 +341,22 @@ export async function syncEbayForProductsFromEbayStock(
             if (json && Array.isArray(json.results)) {
               json.results.forEach((r: any) => {
                 const ok = r?.status === 'SUCCESS' || r?.statusCode === 200;
-                if (ok) totalUpdated += 1;
-                else {
+                if (ok) {
+                  totalUpdated += 1;
+                } else {
                   totalFailed += 1;
                   const errs = Array.isArray(r?.errors) ? r.errors : [];
+                  const firstMsg = errs && errs.length ? String(errs[0]?.message || errs[0]?.code || 'error') : 'error';
+                  detailLines.push(`${r?.sku || 'unknown'} — ${firstMsg}`);
                   if (errs.some((e: any) => String(e?.message || '').includes('token_expired'))) {
                     sawTokenExpired = true;
                   }
                 }
               });
+            } else if (json && json.dry_run) {
+              // Dry run: pas de push, mais on documente ce qui partirait
+              const planned = Array.isArray(json.items) ? json.items.length : 0;
+              detailLines.push(`[dry-run ${accId}] ${planned} item(s)`);
             } else {
               // Considérer tout le batch en échec
               totalFailed += chunk.length;
@@ -356,15 +364,26 @@ export async function syncEbayForProductsFromEbayStock(
             console.warn('syncEbayForProductsFromEbayStock: stock-update failed', accId, resp.status, raw?.substring(0, 200));
           } else {
             // OK: compter updated/failed depuis le payload
-            const updated = Number(json?.updated || 0);
-            const failed = Number(json?.failed || 0);
-            totalUpdated += isFinite(updated) ? updated : 0;
-            totalFailed += isFinite(failed) ? failed : 0;
+            if (json && json.dry_run) {
+              const planned = Array.isArray(json.items) ? json.items.length : 0;
+              detailLines.push(`[dry-run ${accId}] ${planned} item(s)`);
+            } else {
+              const updated = Number(json?.updated || 0);
+              const failed = Number(json?.failed || 0);
+              totalUpdated += isFinite(updated) ? updated : 0;
+              totalFailed += isFinite(failed) ? failed : 0;
 
-            const arr = Array.isArray(json?.results) ? json.results : [];
-            if (arr.length > 0) {
-              if (arr.some((r: any) => Array.isArray(r?.errors) && r.errors.some((e: any) => String(e?.message || '').includes('token_expired')))) {
-                sawTokenExpired = true;
+              const arr = Array.isArray(json?.results) ? json.results : [];
+              if (arr.length > 0) {
+                arr.forEach((r: any) => {
+                  if (Array.isArray(r?.errors) && r.errors.length > 0) {
+                    const firstMsg = String(r.errors[0]?.message || r.errors[0]?.code || 'error');
+                    detailLines.push(`${r?.sku || 'unknown'} — ${firstMsg}`);
+                  }
+                });
+                if (arr.some((r: any) => Array.isArray(r?.errors) && r.errors.some((e: any) => String(e?.message || '').includes('token_expired')))) {
+                  sawTokenExpired = true;
+                }
               }
             }
           }
@@ -380,7 +399,12 @@ export async function syncEbayForProductsFromEbayStock(
       sawTokenExpired ? 'token_expired'
       : (totalFailed > 0 ? 'partial_failure' : undefined);
 
-    return { success, pushed: totalUpdated, error };
+    // Construire un résumé exploitable côté UI
+    const head = `updated=${totalUpdated}, failed=${totalFailed}`;
+    const tail = detailLines.length > 0 ? `\n${detailLines.slice(0, 10).join('\n')}` : '';
+    const summary = head + tail;
+
+    return { success, pushed: totalUpdated, failed: totalFailed, error, summary };
   } catch (e: any) {
     console.warn('syncEbayForProductsFromEbayStock exception', e?.message || e);
     return { success: false, pushed: 0, error: e?.message || 'unknown' };
