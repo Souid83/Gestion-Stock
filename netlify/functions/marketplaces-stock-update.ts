@@ -120,6 +120,25 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
     const chunkSize = 25;
     const results: any[] = [];
 
+    // Pre-filter to SKUs that are actually listed on eBay for this account (avoid silent "offer not found")
+    let listedSkus = new Set<string>();
+    try {
+      const { data: listedOffers } = await supabaseService
+        .from('marketplace_listings')
+        .select('remote_sku')
+        .eq('provider', 'ebay')
+        .eq('marketplace_account_id', account_id);
+      if (Array.isArray(listedOffers)) {
+        listedSkus = new Set(
+          listedOffers
+            .map((o: any) => (o?.remote_sku ?? '').toString().trim())
+            .filter((s: string) => s.length > 0)
+        );
+      }
+    } catch {
+      // proceed without filtering if query fails
+    }
+
     const ensureRefreshedToken = async (): Promise<string | null> => {
       if (!tokenRow.encryption_iv && tokenRow.refresh_token_encrypted?.includes('"iv"')) {
         try { const parsed = JSON.parse(tokenRow.refresh_token_encrypted); tokenRow.encryption_iv = parsed.iv; } catch {}
@@ -188,8 +207,19 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
     };
 
     for (let i = 0; i < items.length; i += chunkSize) {
-      const batch = items.slice(i, i + chunkSize)
+      const batchAll = items.slice(i, i + chunkSize)
         .filter((it: any) => it && typeof it.sku === 'string' && it.sku.trim().length > 0 && typeof it.quantity === 'number');
+
+      // Mark immediately as FAILED the SKUs not listed on eBay for this account
+      const invalid = batchAll.filter((it: any) => !listedSkus.has((it.sku || '').toString().trim()));
+      invalid.forEach((b: any) => results.push({
+        sku: b.sku,
+        status: 'FAILED',
+        errors: [{ message: 'not_listed_on_ebay' }]
+      }));
+
+      // Only send the SKUs that are actually listed
+      const batch = batchAll.filter((it: any) => listedSkus.has((it.sku || '').toString().trim()));
 
       if (batch.length === 0) continue;
 
@@ -252,7 +282,12 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
             });
           });
         } else {
-          batch.forEach((b: any) => results.push({ sku: b.sku, status: 'SUCCESS' }));
+          // No per-SKU responses from eBay; do NOT mark success silently
+          batch.forEach((b: any) => results.push({
+            sku: b.sku,
+            status: 'FAILED',
+            errors: [{ message: 'no_responses_from_ebay' }]
+          }));
         }
       }
     }
