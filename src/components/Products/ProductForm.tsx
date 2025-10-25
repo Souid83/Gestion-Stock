@@ -1567,12 +1567,30 @@ export const ProductForm: React.FC<ProductFormProps> = ({
           if (parents.length > 0) {
             setToast({ message: 'Poussée eBay (stock EBAY) en cours…', type: 'success' });
             const res = await pushEbayFromEbayStock(parents);
-            setToast({
-              message: res.success
-                ? `eBay: ${res.pushed} SKU(s) mis à jour depuis le stock EBAY`
-                : `Erreur eBay: ${res.error || 'inconnue'}`,
-              type: res.success ? 'success' : 'error'
-            });
+            if (res.success) {
+              setToast({
+                message: `eBay: ${res.pushed} SKU(s) mis à jour depuis le stock EBAY`,
+                type: 'success'
+              });
+            } else {
+              // Messages dédiés selon le code d'erreur agrégé
+              if (res.error === 'token_expired') {
+                setToast({
+                  message: 'eBay: session expirée. Veuillez relancer la connexion eBay puis relancer le push.',
+                  type: 'error'
+                });
+              } else if (res.error === 'partial_failure') {
+                setToast({
+                  message: `eBay: mises à jour partielles. Certains SKU n'ont pas été mis à jour (voir logs).`,
+                  type: 'error'
+                });
+              } else {
+                setToast({
+                  message: `Erreur eBay: ${res.error || 'inconnue'}`,
+                  type: 'error'
+                });
+              }
+            }
           }
         } catch (e: any) {
           setToast({ message: `Erreur push eBay: ${e?.message || e}`, type: 'error' });
