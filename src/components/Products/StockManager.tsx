@@ -267,7 +267,8 @@ export const StockManager: React.FC<StockManagerProps> = ({
       try {
         const res = await syncEbayForProductsFromEbayStock([productId]);
         if (res.success) {
-          alert(`Mise à jour eBay réussie: ${res.pushed} SKU(s) mis à jour à partir du stock EBAY.`);
+          const summary = res.summary ? res.summary : `updated=${res.pushed}, failed=${res.failed || 0}`;
+          alert(`Mise à jour eBay (quantités): ${summary}`);
           setHasChanges(false);
           if (onStockUpdate) {
             onStockUpdate();
@@ -275,12 +276,13 @@ export const StockManager: React.FC<StockManagerProps> = ({
           onClose();
         } else {
           const err = res.error || 'unknown';
+          const summary = res.summary ? `\n${res.summary}` : '';
           if (err === 'token_expired') {
-            alert('Session eBay expirée. Veuillez vous reconnecter dans Réglages eBay puis réessayer.');
+            alert(`Session eBay expirée. Veuillez vous reconnecter dans Réglages eBay puis réessayer.${summary}`);
           } else if (err === 'no_mapping') {
-            alert("Aucune action eBay: aucun SKU mappé à eBay pour ce produit.");
+            alert(`Aucune action eBay: aucun SKU mappé à eBay pour ce produit.${summary}`);
           } else {
-            alert(`Erreur eBay: ${err}`);
+            alert(`Erreur eBay: ${err}${summary}`);
           }
         }
       } catch (e) {
@@ -289,6 +291,17 @@ export const StockManager: React.FC<StockManagerProps> = ({
     } catch (err) {
       console.error('Error saving stock allocations:', err);
       setError(err instanceof Error ? err.message : 'An error occurred while saving stock allocations');
+    }
+  };
+
+  // Test (dry-run) du batch eBay pour diagnostic, sans pousser
+  const handleDryRun = async () => {
+    try {
+      const res = await syncEbayForProductsFromEbayStock([productId], { dryRun: true });
+      const summary = res.summary || 'Aucun élément à envoyer (dry-run).';
+      alert(`[Dry-Run] ${summary}`);
+    } catch (e) {
+      alert('Erreur pendant le dry-run eBay.');
     }
   };
 
@@ -464,18 +477,28 @@ export const StockManager: React.FC<StockManagerProps> = ({
                 </p>
               </div>
               {!isMirrorProduct && (
-                <button
-                  onClick={handleSave}
-                  disabled={!hasChanges || totalAllocated !== globalStock}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-md ${
-                    hasChanges && totalAllocated === globalStock
-                      ? 'bg-blue-600 text-white hover:bg-blue-700'
-                      : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                  }`}
-                >
-                  <Save size={18} />
-                  Valider
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDryRun}
+                    className="px-4 py-2 rounded-md border border-gray-300 text-gray-700 bg-white hover:bg-gray-50"
+                    title="Tester l’envoi eBay sans pousser (diagnostic)"
+                  >
+                    Tester (dry-run)
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    disabled={!hasChanges || totalAllocated !== globalStock}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-md ${
+                      hasChanges && totalAllocated === globalStock
+                        ? 'bg-blue-600 text-white hover:bg-blue-700'
+                        : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    }`}
+                  >
+                    <Save size={18} />
+                    Valider
+                  </button>
+                </div>
               )}
             </div>
           </div>
