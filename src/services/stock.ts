@@ -313,6 +313,9 @@ export async function syncEbayForProductsFromEbayStock(
     let sawTokenExpired = false;
 
     const accountIds = Object.keys(byAccount);
+    if (accountIds.length === 0) {
+      return { success: false, pushed: 0, error: 'no_mapping' };
+    }
     for (const accId of accountIds) {
       const items = byAccount[accId] || [];
       for (let i = 0; i < items.length; i += 100) {
