@@ -127,41 +127,41 @@ export const handler = async (event: any) => {
     // Ensure provider_app_credentials are available for this environment (used by stock-update refresh)
     try {
       if (clientId && clientSecret) {
-        // Local helper to encrypt app credentials with SECRET_KEY (AES-GCM) — same scheme as elsewhere
-        const encryptAppField = async (val: string): Promise<{ encrypted: string; iv: string }> => {
-          if (!secretKey) throw new Error("SECRET_KEY not configured");
-          const keyBuffer = Buffer.from(secretKey, "base64");
-          const cryptoKey = await globalThis.crypto.subtle.importKey(
-            "raw",
-            keyBuffer,
-            { name: "AES-GCM", length: 256 },
-            false,
-            ["encrypt"]
-          );
-          const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+        if (!secretKey) throw new Error("SECRET_KEY not configured");
+        // Build crypto key once
+        const keyBuffer = Buffer.from(secretKey, "base64");
+        const cryptoKey = await globalThis.crypto.subtle.importKey(
+          "raw",
+          keyBuffer,
+          { name: "AES-GCM", length: 256 },
+          false,
+          ["encrypt"]
+        );
+        // Generate ONE IV and use it for both fields so a single encryption_iv works
+        const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+        const ivB64 = Buffer.from(iv).toString("base64");
+
+        const encryptWithSameIV = async (val: string): Promise<string> => {
           const encryptedBuffer = await globalThis.crypto.subtle.encrypt(
             { name: "AES-GCM", iv },
             cryptoKey,
             new TextEncoder().encode(val)
           );
-          return {
-            encrypted: Buffer.from(encryptedBuffer).toString("base64"),
-            iv: Buffer.from(iv).toString("base64"),
-          };
+          return Buffer.from(encryptedBuffer).toString("base64");
         };
 
-        const encId = await encryptAppField(String(clientId));
-        const encSecret = await encryptAppField(String(clientSecret));
+        const encClientId = await encryptWithSameIV(String(clientId));
+        const encClientSecret = await encryptWithSameIV(String(clientSecret));
 
         await supabase
           .from('provider_app_credentials')
           .upsert({
             provider: 'ebay',
             environment,
-            client_id_encrypted: encId.encrypted,
-            client_secret_encrypted: encSecret.encrypted,
+            client_id_encrypted: encClientId,
+            client_secret_encrypted: encClientSecret,
             runame: ruName,
-            encryption_iv: encId.iv,
+            encryption_iv: ivB64,
             updated_at: new Date().toISOString()
           } as any, {
             onConflict: 'provider,environment'
