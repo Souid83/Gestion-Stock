@@ -124,6 +124,53 @@ export const handler = async (event: any) => {
     }
     const supabase = createClient(supabaseUrl as string, supabaseKey as string);
 
+    // Ensure provider_app_credentials are available for this environment (used by stock-update refresh)
+    try {
+      if (clientId && clientSecret) {
+        // Local helper to encrypt app credentials with SECRET_KEY (AES-GCM) — same scheme as elsewhere
+        const encryptAppField = async (val: string): Promise<{ encrypted: string; iv: string }> => {
+          if (!secretKey) throw new Error("SECRET_KEY not configured");
+          const keyBuffer = Buffer.from(secretKey, "base64");
+          const cryptoKey = await globalThis.crypto.subtle.importKey(
+            "raw",
+            keyBuffer,
+            { name: "AES-GCM", length: 256 },
+            false,
+            ["encrypt"]
+          );
+          const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+          const encryptedBuffer = await globalThis.crypto.subtle.encrypt(
+            { name: "AES-GCM", iv },
+            cryptoKey,
+            new TextEncoder().encode(val)
+          );
+          return {
+            encrypted: Buffer.from(encryptedBuffer).toString("base64"),
+            iv: Buffer.from(iv).toString("base64"),
+          };
+        };
+
+        const encId = await encryptAppField(String(clientId));
+        const encSecret = await encryptAppField(String(clientSecret));
+
+        await supabase
+          .from('provider_app_credentials')
+          .upsert({
+            provider: 'ebay',
+            environment,
+            client_id_encrypted: encId.encrypted,
+            client_secret_encrypted: encSecret.encrypted,
+            runame: ruName,
+            encryption_iv: encId.iv,
+            updated_at: new Date().toISOString()
+          } as any, {
+            onConflict: 'provider,environment'
+          } as any);
+      }
+    } catch (e) {
+      console.warn('⚠️ provider_app_credentials upsert failed (non-blocking):', e);
+    }
+
     // --- Upsert marketplace_accounts ---
     console.log("🔄 Resolving marketplace_account (preserve id if reconnect)...");
     let accountId: string | null = null;
