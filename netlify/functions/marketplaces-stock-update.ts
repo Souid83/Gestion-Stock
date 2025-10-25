@@ -177,6 +177,13 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
           expires_at: refreshed.expires_in ? new Date(Date.now() + refreshed.expires_in * 1000).toISOString() : tokenRow.expires_at || null
         })
         .eq('marketplace_account_id', account_id);
+
+      // Mark account as healthy (no reauth needed) after a successful refresh
+      await supabaseService
+        .from('marketplace_accounts')
+        .update({ needs_reauth: false, updated_at: new Date().toISOString() } as any)
+        .eq('id', account_id as any);
+
       return refreshed.access_token;
     };
 
@@ -199,6 +206,13 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
       if (resp.status === 401) {
         const newToken = await ensureRefreshedToken();
         if (!newToken) {
+          // Mark account as requiring reauth when refresh is impossible
+          try {
+            await supabaseService
+              .from('marketplace_accounts')
+              .update({ needs_reauth: true, updated_at: new Date().toISOString() } as any)
+              .eq('id', account_id as any);
+          } catch {}
           batch.forEach((b: any) => results.push({ sku: b.sku, status: 'FAILED', errors: [{ message: 'token_expired' }] }));
           continue;
         }
