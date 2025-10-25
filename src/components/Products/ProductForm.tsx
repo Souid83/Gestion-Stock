@@ -156,6 +156,8 @@ export const ProductForm: React.FC<ProductFormProps> = ({
   const [nameTouched, setNameTouched] = useState(false);
   const [stocks, setStocks] = useState<Stock[]>([]);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  // Modal de confirmation fixe pour push eBay
+  const [ebayPushModal, setEbayPushModal] = useState<{ open: boolean; message: string }>(() => ({ open: false, message: '' }));
   const [pushToEbayAfterImport, setPushToEbayAfterImport] = useState(true);
 
   useEffect(() => {
@@ -1594,12 +1596,12 @@ export const ProductForm: React.FC<ProductFormProps> = ({
                 } else {
                   setToast({ message: 'Poussée eBay (stock EBAY) en cours…', type: 'success' });
                   const res = await pushEbayFromEbayStock(parents);
-                  if (res.success) {
-                    setToast({
-                      message: `eBay: ${res.pushed} SKU(s) mis à jour depuis le stock EBAY`,
-                      type: 'success'
-                    });
-                  } else {
+            if (res.success) {
+              setEbayPushModal({
+                open: true,
+                message: `Mise à jour eBay réussie: ${res.pushed} SKU(s) mis à jour à partir du stock EBAY.`
+              });
+            } else {
                     if (res.error === 'token_expired') {
                       setToast({
                         message: 'eBay: session expirée. Veuillez relancer la connexion eBay puis relancer le push.',
@@ -2692,6 +2694,4 @@ export const ProductForm: React.FC<ProductFormProps> = ({
           onClose={() => setToast(null)}
         />
       )}
-    </div>
-  );
-};
+
