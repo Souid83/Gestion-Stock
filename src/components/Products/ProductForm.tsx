@@ -2695,3 +2695,25 @@ export const ProductForm: React.FC<ProductFormProps> = ({
         />
       )}
 
+      {/* Modal fixe de confirmation push eBay */}
+      {ebayPushModal.open && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Synchronisation eBay</h3>
+            <p className="text-gray-700 mb-6">{ebayPushModal.message}</p>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => setEbayPushModal({ open: false, message: '' })}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                autoFocus
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
