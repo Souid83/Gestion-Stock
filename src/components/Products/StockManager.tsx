@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 import { X, Plus, Save, Trash2 } from 'lucide-react';
-import { syncEbayForProducts } from '../../services/stock';
+import { syncEbayForProductsFromEbayStock } from '../../services/stock';
 
 interface Stock {
   id: string;
@@ -263,18 +263,29 @@ export const StockManager: React.FC<StockManagerProps> = ({
 
       if (updateError) throw updateError;
 
-      // Auto-sync vers eBay pour les produits déjà mappés (best effort)
+      // Auto-push eBay (stock EBAY du PAU) — popup bloquante via alert() pour confirmation
       try {
-        await syncEbayForProducts([productId]);
+        const res = await syncEbayForProductsFromEbayStock([productId]);
+        if (res.success) {
+          alert(`Mise à jour eBay réussie: ${res.pushed} SKU(s) mis à jour à partir du stock EBAY.`);
+          setHasChanges(false);
+          if (onStockUpdate) {
+            onStockUpdate();
+          }
+          onClose();
+        } else {
+          const err = res.error || 'unknown';
+          if (err === 'token_expired') {
+            alert('Session eBay expirée. Veuillez vous reconnecter dans Réglages eBay puis réessayer.');
+          } else if (err === 'no_mapping') {
+            alert("Aucune action eBay: aucun SKU mappé à eBay pour ce produit.");
+          } else {
+            alert(`Erreur eBay: ${err}`);
+          }
+        }
       } catch (e) {
-        console.warn('syncEbayForProducts failed', e);
+        alert('Erreur réseau pendant la synchronisation eBay.');
       }
-
-      setHasChanges(false);
-      if (onStockUpdate) {
-        onStockUpdate();
-      }
-      onClose();
     } catch (err) {
       console.error('Error saving stock allocations:', err);
       setError(err instanceof Error ? err.message : 'An error occurred while saving stock allocations');
