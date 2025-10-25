@@ -1564,32 +1564,72 @@ export const ProductForm: React.FC<ProductFormProps> = ({
       if (pushToEbayAfterImport) {
         try {
           const parents = Array.from(affectedParents);
-          if (parents.length > 0) {
-            setToast({ message: 'Poussée eBay (stock EBAY) en cours…', type: 'success' });
-            const res = await pushEbayFromEbayStock(parents);
-            if (res.success) {
-              setToast({
-                message: `eBay: ${res.pushed} SKU(s) mis à jour depuis le stock EBAY`,
-                type: 'success'
-              });
-            } else {
-              // Messages dédiés selon le code d'erreur agrégé
-              if (res.error === 'token_expired') {
+
+          // Aucun parent impacté
+          if (parents.length === 0) {
+            setToast({
+              message: 'Aucune action eBay: aucun parent impacté par l’import.',
+              type: 'error'
+            });
+          } else {
+            // Vérifier qu’au moins un compte eBay est connecté avant de pousser
+            try {
+              const accResp = await fetch('/.netlify/functions/marketplaces-accounts?provider=ebay');
+              const accText = await accResp.text();
+              if (!accResp.ok) {
                 setToast({
-                  message: 'eBay: session expirée. Veuillez relancer la connexion eBay puis relancer le push.',
-                  type: 'error'
-                });
-              } else if (res.error === 'partial_failure') {
-                setToast({
-                  message: `eBay: mises à jour partielles. Certains SKU n'ont pas été mis à jour (voir logs).`,
+                  message: `Fonctions Netlify indisponibles ou erreur comptes eBay (${accResp.status}).`,
                   type: 'error'
                 });
               } else {
-                setToast({
-                  message: `Erreur eBay: ${res.error || 'inconnue'}`,
-                  type: 'error'
-                });
+                let accountsPayload: any = null;
+                try { accountsPayload = JSON.parse(accText); } catch { accountsPayload = null; }
+                const accs = Array.isArray(accountsPayload?.accounts) ? accountsPayload.accounts : [];
+                const hasConnected = accs.some((a: any) => a && a.connected === true);
+                if (!hasConnected) {
+                  setToast({
+                    message: 'Aucun compte eBay connecté. Relancez la connexion puis réessayez.',
+                    type: 'error'
+                  });
+                } else {
+                  setToast({ message: 'Poussée eBay (stock EBAY) en cours…', type: 'success' });
+                  const res = await pushEbayFromEbayStock(parents);
+                  if (res.success) {
+                    setToast({
+                      message: `eBay: ${res.pushed} SKU(s) mis à jour depuis le stock EBAY`,
+                      type: 'success'
+                    });
+                  } else {
+                    if (res.error === 'token_expired') {
+                      setToast({
+                        message: 'eBay: session expirée. Veuillez relancer la connexion eBay puis relancer le push.',
+                        type: 'error'
+                      });
+                    } else if (res.error === 'partial_failure') {
+                      setToast({
+                        message: `eBay: mises à jour partielles. Certains SKU n'ont pas été mis à jour (voir logs).`,
+                        type: 'error'
+                      });
+                    } else if (res.error === 'no_mapping') {
+                      setToast({
+                        message: 'Aucune action eBay: aucun SKU mappé à eBay pour les produits importés.',
+                        type: 'error'
+                      });
+                    } else {
+                      setToast({
+                        message: `Erreur eBay: ${res.error || 'inconnue'}`,
+                        type: 'error'
+                      });
+                    }
+                  }
+                }
               }
+            } catch (e) {
+              // Erreur réseau (ex: netlify dev non lancé)
+              setToast({
+                message: 'Fonctions Netlify indisponibles (réseau). Démarrez netlify dev ou déployez.',
+                type: 'error'
+              });
             }
           }
         } catch (e: any) {
