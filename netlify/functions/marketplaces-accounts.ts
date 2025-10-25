@@ -233,6 +233,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         provider_account_id: canonical.provider_account_id,
         connected: Boolean(withToken),
         needs_reauth: Boolean((canonical as any)?.needs_reauth)
+      });
     }
 
     await logToSyncLogs(supabase, provider, 'accounts_list', 'ok', {
