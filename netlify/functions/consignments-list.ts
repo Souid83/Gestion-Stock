@@ -164,6 +164,37 @@ export const handler = async (event: any) => {
 
     if (summaryError) {
       console.error('[consignments-list] Erreur chargement synthèse:', summaryError);
+
+      // Fallback propre si la vue n'existe pas (42P01 / "does not exist"):
+      const msg = String(summaryError?.message || '');
+      const code = (summaryError as any)?.code || '';
+      const missingView =
+        msg.toLowerCase().includes('does not exist') ||
+        code === '42P01';
+
+      if (missingView) {
+        // Répondre 200 avec synthèse vide pour ne pas casser l'UI
+        const response = {
+          ok: true,
+          summary: [],
+          meta: {
+            user_role: userRole,
+            can_view_vat: canViewVAT,
+            filters: { stockId, customerId, searchQuery, fromDate, toDate }
+          }
+        };
+
+        return {
+          statusCode: 200,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Headers': 'content-type, authorization'
+          },
+          body: JSON.stringify(response)
+        };
+      }
+
       return {
         statusCode: 500,
         headers: {
