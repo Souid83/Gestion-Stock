@@ -194,8 +194,8 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       ? EBAY_SANDBOX_AUTH_URL
       : EBAY_PRODUCTION_AUTH_URL;
 
+    // Required SELL scopes only (no client_credentials here)
     const scopes = [
-      'https://api.ebay.com/oauth/api_scope',
       'https://api.ebay.com/oauth/api_scope/sell.account',
       'https://api.ebay.com/oauth/api_scope/sell.inventory',
       'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
@@ -206,11 +206,13 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     const safeUrl = authorizeUrl.replace(/([?&]state=)[^&]+/, '$1<hidden>');
     console.log('eBay authorize', { environment, url: safeUrl });
 
+    // Redirect directly to eBay consent page (no cookies here)
     return {
-      statusCode: 200,
-      body: JSON.stringify({
-        authorizeUrl
-      })
+      statusCode: 302,
+      headers: {
+        Location: authorizeUrl
+      },
+      body: ''
     };
 
   } catch (error: any) {
