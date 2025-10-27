@@ -143,11 +143,15 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     }
 
     const ruNameEnv = environment === 'sandbox' ? (process.env.EBAY_RUNAME_SANDBOX || '') : (process.env.EBAY_RUNAME_PROD || '');
-    if (!ruNameEnv) {
+    const ruNameFinal = ruNameEnv || runame || '';
+    if (!ruNameFinal) {
       return {
         statusCode: 500,
-        body: JSON.stringify({ error: 'Missing RUName for environment' })
+        body: JSON.stringify({ error: 'Missing RUName for environment and no runame provided' })
       };
+    }
+    if (!ruNameEnv) {
+      console.warn('[eBay Authorize] RUName not set in env for', environment, '- falling back to request body runame.');
     }
 
     const { encrypted: encryptedClientId, iv } = await encryptData(client_id);
@@ -160,7 +164,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         environment,
         client_id_encrypted: encryptedClientId,
         client_secret_encrypted: encryptedClientSecret,
-        runame: ruNameEnv,
+        runame: ruNameFinal,
         encryption_iv: iv,
         updated_at: new Date().toISOString()
       }, {
@@ -197,7 +201,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
     ];
 
-    const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(ruNameEnv)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateEncoded)}&prompt=login`;
+    const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(ruNameFinal)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateEncoded)}&prompt=login`;
 
     const safeUrl = authorizeUrl.replace(/([?&]state=)[^&]+/, '$1<hidden>');
     console.log('eBay authorize', { environment, url: safeUrl });
