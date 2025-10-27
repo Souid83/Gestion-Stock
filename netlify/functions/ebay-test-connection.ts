@@ -218,6 +218,20 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     let clientId: string;
     let clientSecret: string;
     const environment = account.environment || 'sandbox';
+    const ruName = environment === 'sandbox' ? (process.env.EBAY_RUNAME_SANDBOX || '') : (process.env.EBAY_RUNAME_PROD || '');
+    if (!ruName) {
+      await logToSyncLogs(supabase, {
+        marketplace_account_id: account_id,
+        operation: 'oauth_test',
+        outcome: 'fail',
+        http_status: 500,
+        message: 'Missing RUName for environment'
+      });
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'missing_runame_for_environment' })
+      };
+    }
 
     const { data: credentials } = await supabase
       .from('provider_app_credentials')
@@ -321,10 +335,12 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         const refreshToken = await decryptData(tokenRow.refresh_token_encrypted, tokenRow.encryption_iv);
         const authHeader = 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
 
+        const scopeStr = (tokenRow.scope || '').toString().trim() || 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment';
         const tokenBody = new URLSearchParams({
           grant_type: 'refresh_token',
           refresh_token: refreshToken,
-          scope: tokenRow.scope || ''
+          redirect_uri: ruName,
+          scope: scopeStr
         });
 
         const tokenResponse = await fetch(tokenUrl, {
@@ -416,10 +432,12 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         const refreshToken = await decryptData(tokenRow.refresh_token_encrypted, tokenRow.encryption_iv);
         const authHeader = 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
 
+        const scopeStr2 = (tokenRow.scope || '').toString().trim() || 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment';
         const tokenBody = new URLSearchParams({
           grant_type: 'refresh_token',
           refresh_token: refreshToken,
-          scope: tokenRow.scope || ''
+          redirect_uri: ruName,
+          scope: scopeStr2
         });
 
         const tokenResponse = await fetch(tokenUrl, {
@@ -492,10 +510,12 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         const refreshToken = await decryptData(tokenRow.refresh_token_encrypted, tokenRow.encryption_iv);
         const authHeader = 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
 
+        const scopeStr3 = (tokenRow.scope || '').toString().trim() || 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment';
         const tokenBody = new URLSearchParams({
           grant_type: 'refresh_token',
           refresh_token: refreshToken,
-          scope: tokenRow.scope || ''
+          redirect_uri: ruName,
+          scope: scopeStr3
         });
 
         const tokenResponse = await fetch(tokenUrl, {
@@ -547,6 +567,25 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         privileges = await retryPrivilegeResponse.json();
 
       } else if (!privilegeResponse.ok) {
+        if (privilegeResponse.status === 401 || privilegeResponse.status === 403) {
+          await logToSyncLogs(supabase, {
+            marketplace_account_id: account_id,
+            operation: 'oauth_test',
+            outcome: 'fail',
+            http_status: privilegeResponse.status,
+            message: 'insufficient_permissions_or_r0',
+            retry_count: retryCount
+          });
+          return {
+            statusCode: 200,
+            body: JSON.stringify({
+              ok: false,
+              reason: 'insufficient_permissions_or_r0',
+              hint: 'Refaire consent Authorization Code avec scopes sell.*',
+              environment
+            })
+          };
+        }
         throw new Error(`Privilege API failed: ${privilegeResponse.status}`);
       } else {
         privileges = await privilegeResponse.json();
@@ -564,6 +603,10 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       return {
         statusCode: 200,
         body: JSON.stringify({
+          ok: true,
+          token_type: 'r1',
+          scopes: (tokenRow.scope || '').toString().trim(),
+          environment,
           identity: {
             userId: identity?.userId || '',
             username: identity?.username || '',
