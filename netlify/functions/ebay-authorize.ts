@@ -125,7 +125,35 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       };
     }
 
-    const body: RequestBody = JSON.parse(event.body);
+    // Accept JSON or application/x-www-form-urlencoded bodies
+    let parsed: any = {};
+    const rawBody = event.body || '';
+    const contentType = (event.headers['content-type'] || event.headers['Content-Type'] || '').toLowerCase();
+
+    try {
+      if (contentType.includes('application/json')) {
+        parsed = JSON.parse(rawBody);
+      } else {
+        const params = new URLSearchParams(rawBody);
+        parsed = {
+          environment: params.get('environment') || undefined,
+          client_id: params.get('client_id') || undefined,
+          client_secret: params.get('client_secret') || undefined,
+          runame: params.get('runame') || undefined,
+          account_id: params.get('account_id') || undefined
+        };
+      }
+    } catch {
+      parsed = {};
+    }
+
+    const body: RequestBody = {
+      environment: parsed.environment,
+      client_id: parsed.client_id,
+      client_secret: parsed.client_secret,
+      runame: parsed.runame,
+      account_id: parsed.account_id
+    } as any;
     const { environment, client_id, client_secret, runame } = body;
 
     if (!environment || !client_id || !client_secret) {
