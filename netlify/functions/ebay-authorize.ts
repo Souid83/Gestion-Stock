@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 
 interface NetlifyEvent {
   httpMethod: string;
+  queryStringParameters?: Record<string, string> | null;
   headers: Record<string, string>;
   body: string | null;
 }
@@ -24,16 +25,54 @@ const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
 const SECRET_KEY = process.env.SECRET_KEY || '';
 
-const EBAY_SANDBOX_AUTH_URL = 'https://auth.sandbox.ebay.com/oauth2/authorize';
-const EBAY_PRODUCTION_AUTH_URL = 'https://auth.ebay.com/oauth2/authorize';
+interface eBayIdentityResponse {
+  userId: string;
+  username: string;
+  registrationMarketplaceId: string;
+}
 
-interface RequestBody {
-  environment: 'sandbox' | 'production';
-  client_id: string;
-  client_secret: string;
-  runame: string;
-  // Optionnel: si on reconnecte un compte existant, passer son id pour préserver le marketplace_account_id
-  account_id?: string | null;
+interface eBayPrivilegesResponse {
+  sellerRegistrationCompleted: boolean;
+  sellingLimit?: {
+    amount: {
+      value: string;
+      currency: string;
+    };
+    quantity: number;
+  } | null;
+}
+
+interface eBayTokenResponse {
+  access_token: string;
+  expires_in: number;
+  refresh_token?: string;
+  token_type: string;
+}
+
+async function decryptData(encrypted: string, iv: string): Promise<string> {
+  if (!SECRET_KEY) {
+    throw new Error('SECRET_KEY not configured');
+  }
+
+  const keyBuffer = Buffer.from(SECRET_KEY, 'base64');
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    keyBuffer,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['decrypt']
+  );
+
+  const encryptedBuffer = Buffer.from(encrypted, 'base64');
+  const ivBuffer = Buffer.from(iv, 'base64');
+
+  const decryptedBuffer = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: ivBuffer },
+    cryptoKey,
+    encryptedBuffer
+  );
+
+  return new TextDecoder().decode(decryptedBuffer);
 }
 
 async function encryptData(data: string): Promise<{ encrypted: string; iv: string }> {
@@ -67,145 +106,534 @@ async function encryptData(data: string): Promise<{ encrypted: string; iv: strin
   };
 }
 
-function generateStateNonce(): string {
-  const array = new Uint8Array(32);
-  crypto.getRandomValues(array);
-  return Buffer.from(array).toString('base64url');
+function logToSyncLogs(
+  supabase: any,
+  details: {
+    marketplace_account_id: string;
+    operation: string;
+    outcome: 'ok' | 'retry' | 'fail';
+    http_status: number;
+    message?: string;
+    retry_count?: number;
+  }
+) {
+  return supabase.from('sync_logs').insert({
+    marketplace_account_id: details.marketplace_account_id,
+    operation: details.operation,
+    outcome: details.outcome,
+    http_status: details.http_status,
+    error_message: details.message || null,
+    metadata: {
+      provider: 'ebay',
+      retry_count: details.retry_count || 0
+    }
+  });
 }
 
-async function checkAdminAccess(supabase: any): Promise<boolean> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return false;
+async function checkRBAC(supabase: any): Promise<boolean> {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return false;
 
-  const { data, error } = await supabase
-    .from('admin_users')
-    .select('is_admin')
-    .eq('id', user.id)
-    .maybeSingle();
+    const { data, error } = await supabase
+      .from('admin_users')
+      .select('is_admin')
+      .eq('id', user.id)
+      .maybeSingle();
 
-  if (error || !data) return false;
-  return data.is_admin === true;
+    if (error) return false;
+
+    return (data as any)?.is_admin ?? false;
+  } catch {
+    return false;
+  }
 }
 
 export const handler = async (event: NetlifyEvent, context: NetlifyContext): Promise<NetlifyResponse> => {
-  // RBAC bypass pour développement / sandbox
-  const RBAC_BYPASS = process.env.RBAC_DISABLED === 'true';
-  if (RBAC_BYPASS) {
-    console.log('⚙️ RBAC bypass activé pour eBay authorize');
-  }
-
-  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    global: {
-      headers: {
-        Authorization: event.headers.authorization || ''
-      }
-    }
-  });
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
   try {
-    if (event.httpMethod !== 'POST') {
+    if (event.httpMethod !== 'GET') {
       return {
         statusCode: 405,
         body: JSON.stringify({ error: 'method_not_allowed' })
       };
     }
 
-    const isAdmin = await checkAdminAccess(supabase);
-    if (!isAdmin && !RBAC_BYPASS) {
+    const hasAccess = await checkRBAC(supabase);
+    if (!hasAccess) {
       return {
         statusCode: 403,
         body: JSON.stringify({ error: 'forbidden' })
       };
     }
 
-    if (!event.body) {
+    const { account_id } = event.queryStringParameters || {};
+
+    if (!account_id) {
       return {
         statusCode: 400,
-        body: JSON.stringify({ error: 'bad_request', hint: 'Missing request body' })
+        body: JSON.stringify({ error: 'missing_account_id' })
       };
     }
 
-    const body: RequestBody = JSON.parse(event.body);
-    const { environment, client_id, client_secret, runame } = body;
+    const { data: account, error: accountError } = await supabase
+      .from('marketplace_accounts')
+      .select('*')
+      .eq('id', account_id)
+      .eq('provider', 'ebay')
+      .eq('is_active', true)
+      .maybeSingle();
 
-    if (!environment || !client_id || !client_secret || !runame) {
+    if (accountError || !account) {
       return {
-        statusCode: 400,
-        body: JSON.stringify({ error: 'bad_request', hint: 'All fields are required' })
+        statusCode: 404,
+        body: JSON.stringify({ error: 'account_not_found' })
       };
     }
 
-    if (environment !== 'sandbox' && environment !== 'production') {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ error: 'bad_request', hint: 'Invalid environment' })
-      };
-    }
-
-    const { encrypted: encryptedClientId, iv } = await encryptData(client_id);
-    const { encrypted: encryptedClientSecret } = await encryptData(client_secret);
-
-    await supabase
-      .from('provider_app_credentials')
-      .upsert({
-        provider: 'ebay',
-        environment,
-        client_id_encrypted: encryptedClientId,
-        client_secret_encrypted: encryptedClientSecret,
-        runame,
-        encryption_iv: iv,
-        updated_at: new Date().toISOString()
-      }, {
-        onConflict: 'provider,environment'
-      });
-
-    const stateNonce = generateStateNonce();
-    // Encoder dans state: nonce + environment + (optionnel) account_id pour reconnection
-    const statePayload = {
-      n: stateNonce,
-      environment,
-      account_id: (body as any).account_id || null
-    };
-    const stateEncoded = Buffer.from(JSON.stringify(statePayload)).toString('base64url');
-
-    await supabase
+    const { data: tokenRow, error: tokenError } = await supabase
       .from('oauth_tokens')
-      .insert({
-        marketplace_account_id: null,
-        access_token: 'pending',
-        state_nonce: stateNonce,
-        expires_at: new Date(Date.now() + 600000).toISOString(),
-        updated_at: new Date().toISOString()
+      .select('*')
+      .eq('marketplace_account_id', account_id)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (tokenError || !tokenRow) {
+      await logToSyncLogs(supabase, {
+        marketplace_account_id: account_id,
+        operation: 'oauth_test',
+        outcome: 'fail',
+        http_status: 424,
+        message: 'Token missing'
       });
 
-    const authBaseUrl = environment === 'sandbox'
-      ? EBAY_SANDBOX_AUTH_URL
-      : EBAY_PRODUCTION_AUTH_URL;
+      return {
+        statusCode: 424,
+        body: JSON.stringify({ error: 'token_missing' })
+      };
+    }
 
-    const scopes = [
-      'https://api.ebay.com/oauth/api_scope',
-      'https://api.ebay.com/oauth/api_scope/sell.marketing.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.marketing',
-      'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.inventory',
-      'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.account',
-      'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
-      'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.finances',
-      'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
-      'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly'
-    ];
+    let clientId: string;
+    let clientSecret: string;
+    const environment = account.environment || 'sandbox';
+    const ruName = environment === 'sandbox' ? (process.env.EBAY_RUNAME_SANDBOX || '') : (process.env.EBAY_RUNAME_PROD || '');
+    if (!ruName) {
+      await logToSyncLogs(supabase, {
+        marketplace_account_id: account_id,
+        operation: 'oauth_test',
+        outcome: 'fail',
+        http_status: 500,
+        message: 'Missing RUName for environment'
+      });
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'missing_runame_for_environment' })
+      };
+    }
 
-    const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(runame)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateEncoded)}`;
+    const { data: credentials } = await supabase
+      .from('provider_app_credentials')
+      .select('*')
+      .eq('provider', 'ebay')
+      .eq('environment', environment)
+      .maybeSingle();
 
-    return {
-      statusCode: 200,
-      body: JSON.stringify({
-        authorizeUrl
-      })
-    };
+    if (credentials) {
+      try {
+        clientId = await decryptData(credentials.client_id_encrypted, credentials.encryption_iv);
+        clientSecret = await decryptData(credentials.client_secret_encrypted, credentials.encryption_iv);
+      } catch {
+        clientId = process.env.EBAY_CLIENT_ID || '';
+        clientSecret = process.env.EBAY_CLIENT_SECRET || '';
+      }
+    } else {
+      clientId = process.env.EBAY_CLIENT_ID || '';
+      clientSecret = process.env.EBAY_CLIENT_SECRET || '';
+    }
+
+    if (!clientId || !clientSecret) {
+      await logToSyncLogs(supabase, {
+        marketplace_account_id: account_id,
+        operation: 'oauth_test',
+        outcome: 'fail',
+        http_status: 500,
+        message: 'Credentials missing'
+      });
+
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'server_error' })
+      };
+    }
+
+    const isSandbox = environment === 'sandbox';
+    const tokenUrl = isSandbox
+      ? 'https://api.sandbox.ebay.com/identity/v1/oauth2/token'
+      : 'https://api.ebay.com/identity/v1/oauth2/token';
+    const identityUrl = isSandbox
+      ? 'https://apiz.sandbox.ebay.com/commerce/identity/v1/user/'
+      : 'https://apiz.ebay.com/commerce/identity/v1/user/';
+    const privilegeUrl = isSandbox
+      ? 'https://api.sandbox.ebay.com/sell/account/v1/privilege'
+      : 'https://api.ebay.com/sell/account/v1/privilege';
+
+    let accessToken = tokenRow.access_token;
+    let hasRefreshed = false;
+
+    const now = new Date();
+    const expiresAt = new Date(tokenRow.expires_at);
+
+    if (now >= expiresAt) {
+      // Fallback normalization for legacy JSON {iv, tag, data} → base64 (ciphertext || tag) + iv, then persist
+  if (!tokenRow.encryption_iv && tokenRow.refresh_token_encrypted?.includes('"iv"')) {
+    try {
+      const legacy = JSON.parse(tokenRow.refresh_token_encrypted as string);
+      const ivB = Buffer.from(legacy.iv, 'hex');
+      const ctB = Buffer.concat([Buffer.from(legacy.data, 'hex'), Buffer.from(legacy.tag, 'hex')]);
+      const ivBase64 = ivB.toString('base64');
+      const ctBase64 = ctB.toString('base64');
+      // Validate decryption to ensure correctness before persisting
+      try {
+        await decryptData(ctBase64, ivBase64);
+        await supabase
+          .from('oauth_tokens')
+          .update({
+            refresh_token_encrypted: ctBase64,
+            encryption_iv: ivBase64,
+            updated_at: new Date().toISOString()
+          })
+          .eq('marketplace_account_id', account_id);
+        tokenRow.refresh_token_encrypted = ctBase64;
+        tokenRow.encryption_iv = ivBase64;
+        console.log('🔁 Normalized legacy refresh token to base64 + iv and persisted');
+      } catch (e) {
+        console.warn('⚠️ Legacy token normalize decrypt failed, skipping persist:', (e as any)?.message || e);
+      }
+    } catch {
+      // ignore JSON parse errors
+    }
+  }
+
+  if (!tokenRow.refresh_token_encrypted || !tokenRow.encryption_iv) {
+        await logToSyncLogs(supabase, {
+          marketplace_account_id: account_id,
+          operation: 'oauth_test',
+          outcome: 'fail',
+          http_status: 424,
+          message: 'Token expired, no refresh token'
+        });
+
+        return {
+          statusCode: 424,
+          body: JSON.stringify({ error: 'token_expired' })
+        };
+      }
+
+      try {
+        const refreshToken = await decryptData(tokenRow.refresh_token_encrypted, tokenRow.encryption_iv);
+        const authHeader = 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+
+        const scopeStr = (tokenRow.scope || '').toString().trim() || 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment';
+        const tokenBody = new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+          redirect_uri: ruName,
+          scope: scopeStr
+        });
+
+        const tokenResponse = await fetch(tokenUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': authHeader,
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: tokenBody.toString()
+        });
+
+        if (!tokenResponse.ok) {
+          const errorData = await tokenResponse.json().catch(() => ({}));
+          const errorCode = errorData.error || 'refresh_failed';
+
+          await logToSyncLogs(supabase, {
+            marketplace_account_id: account_id,
+            operation: 'oauth_test',
+            outcome: 'fail',
+            http_status: tokenResponse.status,
+            message: `Token refresh failed: ${errorCode}`,
+            retry_count: 1
+          });
+
+          return {
+            statusCode: 424,
+            body: JSON.stringify({ error: errorCode, hint: 'Token refresh failed' })
+          };
+        }
+
+        const tokenData: eBayTokenResponse = await tokenResponse.json();
+        accessToken = tokenData.access_token;
+        hasRefreshed = true;
+
+        const newExpiresAt = new Date(Date.now() + tokenData.expires_in * 1000).toISOString();
+
+        let updateData: any = {
+          access_token: accessToken,
+          expires_at: newExpiresAt,
+          updated_at: new Date().toISOString()
+        };
+
+        if (tokenData.refresh_token) {
+          const { encrypted: newEncryptedRefresh, iv: newIv } = await encryptData(tokenData.refresh_token);
+          updateData.refresh_token_encrypted = newEncryptedRefresh;
+          updateData.encryption_iv = newIv;
+        }
+
+        await supabase
+          .from('oauth_tokens')
+          .update(updateData)
+          .eq('marketplace_account_id', account_id);
+
+      } catch (refreshError: any) {
+        await logToSyncLogs(supabase, {
+          marketplace_account_id: account_id,
+          operation: 'oauth_test',
+          outcome: 'fail',
+          http_status: 500,
+          message: 'Refresh error',
+          retry_count: 1
+        });
+
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: 'server_error' })
+        };
+      }
+    }
+
+    let identity: eBayIdentityResponse | null = null;
+    let privileges: eBayPrivilegesResponse | null = null;
+    let retryCount = 0;
+
+    try {
+      const identityResponse = await fetch(identityUrl, {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`
+        }
+      });
+
+      if (identityResponse.status === 401 && !hasRefreshed) {
+        retryCount = 1;
+
+        if (!tokenRow.refresh_token_encrypted || !tokenRow.encryption_iv) {
+          throw new Error('Token invalid, no refresh available');
+        }
+
+        const refreshToken = await decryptData(tokenRow.refresh_token_encrypted, tokenRow.encryption_iv);
+        const authHeader = 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+
+        const scopeStr2 = (tokenRow.scope || '').toString().trim() || 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment';
+        const tokenBody = new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+          redirect_uri: ruName,
+          scope: scopeStr2
+        });
+
+        const tokenResponse = await fetch(tokenUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': authHeader,
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: tokenBody.toString()
+        });
+
+        if (!tokenResponse.ok) {
+          throw new Error('Refresh failed on 401 retry');
+        }
+
+        const tokenData: eBayTokenResponse = await tokenResponse.json();
+        accessToken = tokenData.access_token;
+        hasRefreshed = true;
+
+        const newExpiresAt = new Date(Date.now() + tokenData.expires_in * 1000).toISOString();
+
+        let updateData: any = {
+          access_token: accessToken,
+          expires_at: newExpiresAt,
+          updated_at: new Date().toISOString()
+        };
+
+        if (tokenData.refresh_token) {
+          const { encrypted: newEncryptedRefresh, iv: newIv } = await encryptData(tokenData.refresh_token);
+          updateData.refresh_token_encrypted = newEncryptedRefresh;
+          updateData.encryption_iv = newIv;
+        }
+
+        await supabase
+          .from('oauth_tokens')
+          .update(updateData)
+          .eq('marketplace_account_id', account_id);
+
+        const retryIdentityResponse = await fetch(identityUrl, {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`
+          }
+        });
+
+        if (!retryIdentityResponse.ok) {
+          throw new Error(`Identity API failed after retry: ${retryIdentityResponse.status}`);
+        }
+
+        identity = await retryIdentityResponse.json();
+
+      } else if (!identityResponse.ok) {
+        throw new Error(`Identity API failed: ${identityResponse.status}`);
+      } else {
+        identity = await identityResponse.json();
+      }
+
+      const privilegeResponse = await fetch(privilegeUrl, {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`
+        }
+      });
+
+      if (privilegeResponse.status === 401 && !hasRefreshed) {
+        retryCount = 1;
+
+        if (!tokenRow.refresh_token_encrypted || !tokenRow.encryption_iv) {
+          throw new Error('Token invalid, no refresh available');
+        }
+
+        const refreshToken = await decryptData(tokenRow.refresh_token_encrypted, tokenRow.encryption_iv);
+        const authHeader = 'Basic ' + Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+
+        const scopeStr3 = (tokenRow.scope || '').toString().trim() || 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment';
+        const tokenBody = new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+          redirect_uri: ruName,
+          scope: scopeStr3
+        });
+
+        const tokenResponse = await fetch(tokenUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': authHeader,
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: tokenBody.toString()
+        });
+
+        if (!tokenResponse.ok) {
+          throw new Error('Refresh failed on 401 retry');
+        }
+
+        const tokenData: eBayTokenResponse = await tokenResponse.json();
+        accessToken = tokenData.access_token;
+        hasRefreshed = true;
+
+        const newExpiresAt = new Date(Date.now() + tokenData.expires_in * 1000).toISOString();
+
+        let updateData: any = {
+          access_token: accessToken,
+          expires_at: newExpiresAt,
+          updated_at: new Date().toISOString()
+        };
+
+        if (tokenData.refresh_token) {
+          const { encrypted: newEncryptedRefresh, iv: newIv } = await encryptData(tokenData.refresh_token);
+          updateData.refresh_token_encrypted = newEncryptedRefresh;
+          updateData.encryption_iv = newIv;
+        }
+
+        await supabase
+          .from('oauth_tokens')
+          .update(updateData)
+          .eq('marketplace_account_id', account_id);
+
+        const retryPrivilegeResponse = await fetch(privilegeUrl, {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`
+          }
+        });
+
+        if (!retryPrivilegeResponse.ok) {
+          throw new Error(`Privilege API failed after retry: ${retryPrivilegeResponse.status}`);
+        }
+
+        privileges = await retryPrivilegeResponse.json();
+
+      } else if (!privilegeResponse.ok) {
+        if (privilegeResponse.status === 401 || privilegeResponse.status === 403) {
+          await logToSyncLogs(supabase, {
+            marketplace_account_id: account_id,
+            operation: 'oauth_test',
+            outcome: 'fail',
+            http_status: privilegeResponse.status,
+            message: 'insufficient_permissions_or_r0',
+            retry_count: retryCount
+          });
+          return {
+            statusCode: 200,
+            body: JSON.stringify({
+              ok: false,
+              reason: 'insufficient_permissions_or_r0',
+              hint: 'Refaire consent Authorization Code avec scopes sell.*',
+              environment
+            })
+          };
+        }
+        throw new Error(`Privilege API failed: ${privilegeResponse.status}`);
+      } else {
+        privileges = await privilegeResponse.json();
+      }
+
+      await logToSyncLogs(supabase, {
+        marketplace_account_id: account_id,
+        operation: 'oauth_test',
+        outcome: retryCount > 0 ? 'retry' : 'ok',
+        http_status: 200,
+        message: 'Connection test successful',
+        retry_count: retryCount
+      });
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          ok: true,
+          token_type: 'r1',
+          scopes: (tokenRow.scope || '').toString().trim(),
+          environment,
+          identity: {
+            userId: identity?.userId || '',
+            username: identity?.username || '',
+            registrationMarketplaceId: identity?.registrationMarketplaceId || ''
+          },
+          privileges: {
+            sellerRegistrationCompleted: privileges?.sellerRegistrationCompleted || false,
+            sellingLimit: privileges?.sellingLimit || null
+          }
+        })
+      };
+
+    } catch (apiError: any) {
+      await logToSyncLogs(supabase, {
+        marketplace_account_id: account_id,
+        operation: 'oauth_test',
+        outcome: 'fail',
+        http_status: 502,
+        message: 'eBay API error',
+        retry_count: retryCount
+      });
+
+      return {
+        statusCode: 502,
+        body: JSON.stringify({ error: 'ebay_unavailable' })
+      };
+    }
 
   } catch (error: any) {
     return {
