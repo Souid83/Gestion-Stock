@@ -29,9 +29,9 @@ export const handler = async (event: any) => {
   const envHint = (process.env.EBAY_ENVIRONMENT || process.env.EBAY_ENV || '').toLowerCase();
   const isProd = isHttps || envHint === 'production';
   const buildCookie = (name: string, value: string, maxAge = 300) => {
-    let c = `${name}=${value}; Path=/; Max-Age=${maxAge}`;
-    // Domain is intentionally omitted to let the browser scope the cookie to current host
-    c += isProd ? '; SameSite=None; Secure' : '; SameSite=Lax';
+    // Host-only cookie (no Domain), Path=/, HttpOnly, SameSite=Lax; add Secure only if HTTPS
+    let c = `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
+    if (isHttps) c += '; Secure';
     return c;
   };
 
@@ -345,11 +345,15 @@ export const handler = async (event: any) => {
 
     {
       const redirectLocation = `/pricing?provider=ebay${(typeof insufficientScopes !== 'undefined' && insufficientScopes) ? '&connected=0&reason=insufficient_scope' : '&connected=1'}`;
+      // Set a short-lived host-only cookie to reflect connection status (no Domain, Path=/, HttpOnly, SameSite=Lax; Secure if HTTPS)
+      const cookieVal = (typeof insufficientScopes !== 'undefined' && insufficientScopes) ? 'reauth' : 'connected';
+      const setCookie = buildCookie('ebay', cookieVal, 300);
       return {
         statusCode: 302,
         headers: {
           ...buildCorsHeaders(),
-          'Location': redirectLocation
+          'Location': redirectLocation,
+          'Set-Cookie': setCookie
         },
         body: ''
       };
