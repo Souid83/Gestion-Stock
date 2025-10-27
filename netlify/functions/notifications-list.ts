@@ -2,22 +2,21 @@
 // Endpoint pour lister les notifications de l'utilisateur
 
 export const handler = async (event: any) => {
-  const requestOrigin = (event?.headers && (event.headers.origin || (event.headers as any).Origin)) || '';
-  const frontendOrigin = process.env.FRONTEND_ORIGIN || requestOrigin || '';
-  const buildCorsHeaders = () => (frontendOrigin ? {
-    'Access-Control-Allow-Origin': frontendOrigin,
-    'Access-Control-Allow-Credentials': 'true',
-    'Vary': 'Origin'
-  } : {});
+  // Fixed CORS origin per requirements (no dynamic origin here)
+  const ALLOW_ORIGIN = 'https://dev-gestockflow.netlify.app';
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': ALLOW_ORIGIN,
+    'Access-Control-Allow-Credentials': 'true'
+  };
 
-  // CORS preflight
+  // CORS preflight (fixed headers)
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 204,
       headers: {
-        ...buildCorsHeaders(),
-        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+        ...corsHeaders,
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'content-type, authorization'
       },
       body: ''
     };
@@ -37,8 +36,8 @@ export const handler = async (event: any) => {
     if (event.httpMethod !== 'GET') {
       return {
         statusCode: 405,
-        headers: { 
-          ...buildCorsHeaders(),
+        headers: {
+          ...corsHeaders,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ error: 'method_not_allowed' })
@@ -50,8 +49,8 @@ export const handler = async (event: any) => {
     if (!authHeader.startsWith('Bearer ')) {
       return {
         statusCode: 401,
-        headers: { 
-          ...buildCorsHeaders(),
+        headers: {
+          ...corsHeaders,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ error: 'unauthorized' })
@@ -67,8 +66,8 @@ export const handler = async (event: any) => {
     if (userError || !user) {
       return {
         statusCode: 401,
-        headers: { 
-          ...buildCorsHeaders(),
+        headers: {
+          ...corsHeaders,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ error: 'unauthorized' })
@@ -101,8 +100,8 @@ export const handler = async (event: any) => {
       console.error('[notifications-list] Erreur chargement notifications:', notifError);
       return {
         statusCode: 500,
-        headers: { 
-          ...buildCorsHeaders(),
+        headers: {
+          ...corsHeaders,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ error: 'notifications_error', message: notifError.message })
@@ -117,9 +116,9 @@ export const handler = async (event: any) => {
     return {
       statusCode: 200,
       headers: {
-        ...buildCorsHeaders(),
+        ...corsHeaders,
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+        'Access-Control-Allow-Headers': 'content-type, authorization'
       },
       body: JSON.stringify({
         ok: true,
@@ -132,8 +131,8 @@ export const handler = async (event: any) => {
     console.error('[notifications-list] Erreur globale:', error);
     return {
       statusCode: 500,
-      headers: { 
-        ...buildCorsHeaders(),
+      headers: {
+        ...corsHeaders,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ error: 'internal_error', message: error.message })
