@@ -4,12 +4,43 @@ import crypto from "crypto";
 export const handler = async (event: any) => {
   console.log("🟢 eBay Callback triggered");
 
+  const requestOrigin = (event?.headers && (event.headers.origin || (event.headers as any).Origin)) || '';
+  const frontendOrigin = process.env.FRONTEND_ORIGIN || requestOrigin || '';
+  const buildCorsHeaders = () => (frontendOrigin ? {
+    'Access-Control-Allow-Origin': frontendOrigin,
+    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin'
+  } : {});
+
+  // Preflight handler for CORS
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 204,
+      headers: {
+        ...buildCorsHeaders(),
+        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+      },
+      body: ''
+    };
+  }
+
+  const isHttps = (process.env.URL || '').startsWith('https://') || ((event?.headers || {})['x-forwarded-proto'] === 'https');
+  const envHint = (process.env.EBAY_ENVIRONMENT || process.env.EBAY_ENV || '').toLowerCase();
+  const isProd = isHttps || envHint === 'production';
+  const buildCookie = (name: string, value: string, maxAge = 300) => {
+    let c = `${name}=${value}; Path=/; Max-Age=${maxAge}`;
+    // Domain is intentionally omitted to let the browser scope the cookie to current host
+    c += isProd ? '; SameSite=None; Secure' : '; SameSite=Lax';
+    return c;
+  };
+
   try {
     const url = new URL(event.rawUrl);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     if (!code) {
-      return { statusCode: 400, body: "Missing code" };
+      return { statusCode: 400, headers: buildCorsHeaders(), body: "Missing code" };
     }
 
     // Parse state payload (base64url) to preserve account_id and detect environment
@@ -50,7 +81,7 @@ export const handler = async (event: any) => {
 
     // --- redirect complet obligatoire pour PROD ---
     if (!ruName) {
-      return { statusCode: 500, body: JSON.stringify({ error: "missing_runame" }) };
+      return { statusCode: 500, headers: buildCorsHeaders(), body: JSON.stringify({ error: "missing_runame" }) };
     }
     const redirectFull: string = ruName;
 
@@ -84,14 +115,14 @@ export const handler = async (event: any) => {
 
     if (!response.ok) {
       console.error("❌ eBay OAuth error:", data);
-      return { statusCode: 502, body: JSON.stringify({ ebay_error: data }) };
+      return { statusCode: 502, headers: buildCorsHeaders(), body: JSON.stringify({ ebay_error: data }) };
     }
 
     const { access_token, refresh_token, expires_in, scope, token_type } = data;
 
     // Validate scopes but do not hard-fail; persist token and mark account for reauth if insufficient
     if (!refresh_token) {
-      return { statusCode: 502, body: JSON.stringify({ reason: 'r0_detected_no_refresh_token' }) };
+      return { statusCode: 502, headers: buildCorsHeaders(), body: JSON.stringify({ reason: 'r0_detected_no_refresh_token' }) };
     }
     const scopeStr = typeof scope === 'string' ? scope : Array.isArray(scope) ? scope.join(' ') : '';
     const hasRequired = /\bsell\.inventory\b|\bsell\.account\b|\bsell\.fulfillment\b/.test(scopeStr);
@@ -133,7 +164,7 @@ export const handler = async (event: any) => {
 
     // --- Insertion Supabase ---
     if (!supabaseUrl || !supabaseKey) {
-      return { statusCode: 500, body: JSON.stringify({ error: "missing_supabase_env" }) };
+      return { statusCode: 500, headers: buildCorsHeaders(), body: JSON.stringify({ error: "missing_supabase_env" }) };
     }
     const supabase = createClient(supabaseUrl as string, supabaseKey as string);
 
@@ -148,7 +179,7 @@ export const handler = async (event: any) => {
       // ignore
     }
     if (!stateNonce) {
-      return { statusCode: 401, body: JSON.stringify({ error: 'invalid_or_expired_state' }) };
+      return { statusCode: 401, headers: buildCorsHeaders(), body: JSON.stringify({ error: 'invalid_or_expired_state' }) };
     }
     const { data: pendingRow } = await supabase
       .from('oauth_tokens')
@@ -160,7 +191,7 @@ export const handler = async (event: any) => {
     if (!pendingRow) {
       // cleanup any stale rows with this nonce
       try { await supabase.from('oauth_tokens').delete().eq('state_nonce', stateNonce as any); } catch {}
-      return { statusCode: 401, body: JSON.stringify({ error: 'invalid_or_expired_state' }) };
+      return { statusCode: 401, headers: buildCorsHeaders(), body: JSON.stringify({ error: 'invalid_or_expired_state' }) };
     }
 
     // Ensure provider_app_credentials are available for this environment (used by stock-update refresh)
@@ -288,7 +319,7 @@ export const handler = async (event: any) => {
 
     if (error) {
       console.error("❌ Supabase insert error:", error);
-      return { statusCode: 500, body: JSON.stringify({ insert_error: error }) };
+      return { statusCode: 500, headers: buildCorsHeaders(), body: JSON.stringify({ insert_error: error }) };
     }
 
     console.log("✅ OAuth tokens stored successfully");
@@ -312,12 +343,20 @@ export const handler = async (event: any) => {
         .eq('state_nonce', stateNonce as any);
     } catch {}
 
-    return {
-      statusCode: 302,
-      headers: {
-        Location: `/pricing?provider=ebay${(typeof insufficientScopes !== 'undefined' && insufficientScopes) ? '&connected=0&reason=insufficient_scope' : '&connected=1'}`,
-      },
-    };
+    {
+      const redirectLocation = `/pricing?provider=ebay${(typeof insufficientScopes !== 'undefined' && insufficientScopes) ? '&connected=0&reason=insufficient_scope' : '&connected=1'}`;
+      const cookieVal = (typeof insufficientScopes !== 'undefined' && insufficientScopes) ? 'reauth' : 'connected';
+      const setCookie = buildCookie('ebay', cookieVal, 300);
+      return {
+        statusCode: 302,
+        headers: {
+          ...buildCorsHeaders(),
+          'Location': redirectLocation,
+          'Set-Cookie': setCookie
+        },
+        body: ''
+      };
+    }
   } catch (err: any) {
     console.error("🔥 Callback fatal error:", err);
     return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
