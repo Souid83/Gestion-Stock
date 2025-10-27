@@ -88,8 +88,8 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
       return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'missing_token' }) };
     }
 
-    const accessToken = authHeader.replace('Bearer ', '');
-    const { data: { user }, error: authError } = await supabase.auth.getUser(accessToken);
+    const supabaseAccessToken = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: authError } = await supabase.auth.getUser(supabaseAccessToken);
 
     if (authError || !user) {
       console.warn('⚠️ [StockUpdate] Invalid token or user not found:', authError?.message);
@@ -153,7 +153,7 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
 
     const baseHost = account.environment === 'sandbox' ? 'https://api.sandbox.ebay.com' : 'https://api.ebay.com';
     const updateUrl = new URL('/sell/inventory/v1/bulk_update_price_quantity', baseHost).toString();
-    let accessToken: string = tokenRow.access_token;
+    let ebayAccessToken: string = tokenRow.access_token;
 
     if (dry_run) {
       return { statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify({ dry_run: true, items }) };
@@ -272,7 +272,7 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
         }))
       };
 
-      let resp = await fetch(updateUrl, { method: 'POST', headers: authHeaders(accessToken), body: JSON.stringify(payload) });
+      let resp = await fetch(updateUrl, { method: 'POST', headers: authHeaders(ebayAccessToken), body: JSON.stringify(payload) });
       let raw = await readText(resp);
 
       if (resp.status === 401) {
@@ -288,8 +288,8 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
           batch.forEach((b: any) => results.push({ sku: b.sku, status: 'FAILED', errors: [{ message: 'token_expired' }] }));
           continue;
         }
-        accessToken = newToken;
-        resp = await fetch(updateUrl, { method: 'POST', headers: authHeaders(accessToken), body: JSON.stringify(payload) });
+        ebayAccessToken = newToken;
+        resp = await fetch(updateUrl, { method: 'POST', headers: authHeaders(ebayAccessToken), body: JSON.stringify(payload) });
         raw = await readText(resp);
       }
 
