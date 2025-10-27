@@ -122,34 +122,31 @@ export default function EbaySettings() {
     console.log('✅ eBay settings saved to localStorage');
 
     try {
-      const response = await fetch('/.netlify/functions/ebay-authorize', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          environment: formData.environment,
-          client_id: formData.client_id,
-          client_secret: formData.client_secret,
-          runame: formData.runame
-        })
-      });
+      // Submit a top-level navigation POST (no XHR) to our Netlify function,
+      // which will 302-redirect to eBay authorize. This avoids any CORS on auth2.ebay.com.
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = '/.netlify/functions/ebay-authorize';
+      form.style.display = 'none';
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || 'Échec de la connexion eBay');
-      }
+      const add = (name: string, value: string) => {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = name;
+        input.value = value;
+        form.appendChild(input);
+      };
 
-      const data = await response.json();
+      add('environment', formData.environment);
+      add('client_id', formData.client_id);
+      add('client_secret', formData.client_secret);
+      add('runame', formData.runame);
 
-      if (!data.authorizeUrl) {
-        throw new Error('URL d\'autorisation manquante');
-      }
-
-      window.location.href = data.authorizeUrl;
+      document.body.appendChild(form);
+      form.submit();
     } catch (error: any) {
       setToast({
-        message: error.message || 'Erreur lors de la connexion',
+        message: error?.message || 'Erreur lors de la redirection vers eBay',
         type: 'error',
         show: true
       });
