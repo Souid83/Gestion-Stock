@@ -116,13 +116,9 @@ async function checkAdminAccess(supabase: any): Promise<boolean> {
 }
 
 export const handler = async (event: NetlifyEvent, context: NetlifyContext): Promise<NetlifyResponse> => {
-  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    global: {
-      headers: {
-        Authorization: event.headers.authorization || ''
-      }
-    }
-  });
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
   try {
     if (event.httpMethod !== 'POST') {
@@ -132,18 +128,47 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       };
     }
 
-    const isAdmin = await checkAdminAccess(supabase);
-    // Allow from trusted app origin even if not authenticated admin (to avoid 403 in UI)
-    const origin = event.headers.origin || event.headers.referer || '';
-    const isTrustedOrigin =
-      typeof origin === 'string' &&
-      (origin.includes('dev-gestockflow.netlify.app') || origin.includes('localhost'));
-    if (!isAdmin && !isTrustedOrigin) {
+    // RBAC: Authenticate user and check role
+    console.log('🔐 [Mapping] Authenticating user...');
+    const authHeader = event.headers.authorization || event.headers.Authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.warn('⚠️ [Mapping] Missing or invalid authorization header');
       return {
-        statusCode: 403,
-        body: JSON.stringify({ error: 'forbidden' })
+        statusCode: 401,
+        body: JSON.stringify({ error: 'missing_token' })
       };
     }
+
+    const accessToken = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: authError } = await supabase.auth.getUser(accessToken);
+
+    if (authError || !user) {
+      console.warn('⚠️ [Mapping] Invalid token or user not found:', authError?.message);
+      return {
+        statusCode: 401,
+        body: JSON.stringify({ error: 'invalid_token' })
+      };
+    }
+
+    console.log('✅ [Mapping] User authenticated:', user.id);
+
+    // Load user role
+    const { data: profile, error: profileError } = await supabaseService
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      console.error('❌ [Mapping] Error loading user profile:', profileError);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'profile_load_failed' })
+      };
+    }
+
+    const userRole = profile?.role || 'MAGASIN';
+    console.log('👤 [Mapping] User role:', userRole);
 
     if (!event.body) {
       await logToSyncLogs(supabase, 'ebay', 'mapping_unknown', 'fail', {
@@ -159,6 +184,61 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
 
     const body: RequestBody = JSON.parse(event.body);
     const { action, provider, account_id, remote_id, remote_sku, product_id } = body;
+
+    // RBAC: Check permissions based on action
+    console.log(`🔒 [Mapping] Checking permissions for action: ${action}, role: ${userRole}`);
+
+    if (action === 'create') {
+      // Only ADMIN_FULL and ADMIN can create products from listings
+      const allowedForCreate = ['ADMIN_FULL', 'ADMIN'];
+      if (!allowedForCreate.includes(userRole)) {
+        console.warn(`⚠️ [Mapping] User role ${userRole} not authorized for create action`);
+        await logToSyncLogs(supabase, provider, 'mapping_create', 'fail', {
+          marketplace_account_id: account_id,
+          http_status: 403,
+          error_code: 'insufficient_role',
+          message: `Role ${userRole} cannot create products`
+        });
+        return {
+          statusCode: 403,
+          body: JSON.stringify({ error: 'insufficient_role', hint: 'Only administrators can create products from listings' })
+        };
+      }
+    } else if (action === 'link' || action === 'link_by_sku' || action === 'bulk_link_by_sku') {
+      // ADMIN_FULL, ADMIN, and MAGASIN can link
+      const allowedForLink = ['ADMIN_FULL', 'ADMIN', 'MAGASIN'];
+      if (!allowedForLink.includes(userRole)) {
+        console.warn(`⚠️ [Mapping] User role ${userRole} not authorized for link action`);
+        await logToSyncLogs(supabase, provider, `mapping_${action}`, 'fail', {
+          marketplace_account_id: account_id,
+          http_status: 403,
+          error_code: 'insufficient_role',
+          message: `Role ${userRole} cannot link listings`
+        });
+        return {
+          statusCode: 403,
+          body: JSON.stringify({ error: 'insufficient_role', hint: 'Insufficient permissions to link listings' })
+        };
+      }
+    } else if (action === 'ignore') {
+      // ADMIN_FULL, ADMIN, and MAGASIN can ignore
+      const allowedForIgnore = ['ADMIN_FULL', 'ADMIN', 'MAGASIN'];
+      if (!allowedForIgnore.includes(userRole)) {
+        console.warn(`⚠️ [Mapping] User role ${userRole} not authorized for ignore action`);
+        await logToSyncLogs(supabase, provider, 'mapping_ignore', 'fail', {
+          marketplace_account_id: account_id,
+          http_status: 403,
+          error_code: 'insufficient_role',
+          message: `Role ${userRole} cannot ignore listings`
+        });
+        return {
+          statusCode: 403,
+          body: JSON.stringify({ error: 'insufficient_role', hint: 'Insufficient permissions to ignore listings' })
+        };
+      }
+    }
+
+    console.log(`✅ [Mapping] Permission granted for action: ${action}`);
 
     if (provider !== 'ebay' || !account_id) {
       await logToSyncLogs(supabase, provider || 'unknown', 'mapping_unknown', 'fail', {

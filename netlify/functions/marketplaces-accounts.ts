@@ -177,7 +177,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
 
     const { data: accounts, error } = await supabase
       .from('marketplace_accounts')
-      .select('id, display_name, environment, provider_account_id')
+      .select('id, display_name, environment, provider_account_id, needs_reauth')
       .eq('provider', provider)
       .eq('is_active', true)
       .order('created_at', { ascending: false });
@@ -231,7 +231,8 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         display_name: canonical.display_name,
         environment: canonical.environment,
         provider_account_id: canonical.provider_account_id,
-        connected: Boolean(withToken)
+        connected: Boolean(withToken),
+        needs_reauth: Boolean((canonical as any)?.needs_reauth)
       });
     }
 

@@ -32,6 +32,8 @@ interface RequestBody {
   client_id: string;
   client_secret: string;
   runame: string;
+  // Optionnel: si on reconnecte un compte existant, passer son id pour préserver le marketplace_account_id
+  account_id?: string | null;
 }
 
 async function encryptData(data: string): Promise<{ encrypted: string; iv: string }> {
@@ -158,6 +160,13 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       });
 
     const stateNonce = generateStateNonce();
+    // Encoder dans state: nonce + environment + (optionnel) account_id pour reconnection
+    const statePayload = {
+      n: stateNonce,
+      environment,
+      account_id: (body as any).account_id || null
+    };
+    const stateEncoded = Buffer.from(JSON.stringify(statePayload)).toString('base64url');
 
     await supabase
       .from('oauth_tokens')
@@ -170,9 +179,8 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       });
 
     const authBaseUrl = environment === 'sandbox'
-  ? EBAY_SANDBOX_AUTH_URL
-  : EBAY_PRODUCTION_AUTH_URL;
-
+      ? EBAY_SANDBOX_AUTH_URL
+      : EBAY_PRODUCTION_AUTH_URL;
 
     const scopes = [
       'https://api.ebay.com/oauth/api_scope',
@@ -190,7 +198,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly'
     ];
 
-    const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(runame)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateNonce)}`;
+    const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(runame)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateEncoded)}`;
 
     return {
       statusCode: 200,

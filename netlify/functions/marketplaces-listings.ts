@@ -76,6 +76,46 @@ export const handler = async (event: any) => {
       return { statusCode: 405, headers: JSON_HEADERS, body: JSON.stringify({ error: 'method_not_allowed' }) };
     }
 
+    // RBAC: Authenticate user and check role
+    console.info('🔐 Authenticating user...');
+    const authHeader = event.headers.authorization || event.headers.Authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.warn('⚠️ Missing or invalid authorization header');
+      return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'missing_token' }) };
+    }
+
+    const accessToken = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: authError } = await supabase.auth.getUser(accessToken);
+
+    if (authError || !user) {
+      console.warn('⚠️ Invalid token or user not found:', authError?.message);
+      return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'invalid_token' }) };
+    }
+
+    console.info('✅ User authenticated:', user.id);
+
+    // Load user role
+    const { data: profile, error: profileError } = await supabaseService
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      console.error('❌ Error loading user profile:', profileError);
+      return { statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error: 'profile_load_failed' }) };
+    }
+
+    const userRole = profile?.role || 'MAGASIN';
+    console.info('👤 User role:', userRole);
+
+    // Check if user has access to pricing (ADMIN_FULL, ADMIN)
+    const allowedRoles = ['ADMIN_FULL', 'ADMIN'];
+    if (!allowedRoles.includes(userRole)) {
+      console.warn('⚠️ User role not authorized for pricing:', userRole);
+      return { statusCode: 403, headers: JSON_HEADERS, body: JSON.stringify({ error: 'insufficient_role' }) };
+    }
+
     const qs = event.queryStringParameters || {};
     const account_id = qs.account_id;
     const limit = Math.min(parseInt(qs.limit || '50', 10) || 50, 200);
@@ -581,12 +621,33 @@ export const handler = async (event: any) => {
 
     console.info('✅ Successfully synced', items.length, 'offers');
 
+    // RBAC: Filter purchase_price based on role
+    const filteredItems = items.map((item: any) => {
+      // ADMIN_FULL can see all purchase prices
+      if (userRole === 'ADMIN_FULL') {
+        return item;
+      }
+
+      // ADMIN can see purchase_price only if they created the product
+      if (userRole === 'ADMIN') {
+        const productCreatedBy = item.product_created_by_user_id;
+        if (productCreatedBy && productCreatedBy === user.id) {
+          return item;
+        }
+      }
+
+      // For all other cases (ADMIN without ownership, MAGASIN, COMMANDE), remove purchase_price
+      const { purchase_price, internal_purchase_price, ...rest } = item;
+      console.log('🔒 Masking purchase_price for item:', item.remote_sku || item.remote_id);
+      return rest;
+    });
+
     return {
       statusCode: 200,
       headers: JSON_HEADERS,
       body: JSON.stringify({
-        items,
-        count: items.length,
+        items: filteredItems,
+        count: filteredItems.length,
         limit,
         offset,
         processed_skus: skus.length,

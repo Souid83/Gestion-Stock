@@ -80,6 +80,48 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
       return { statusCode: 405, headers: JSON_HEADERS, body: JSON.stringify({ error: 'method_not_allowed' }) };
     }
 
+    // RBAC: Authenticate user and check role
+    console.log('🔐 [StockUpdate] Authenticating user...');
+    const authHeader = event.headers.authorization || event.headers.Authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.warn('⚠️ [StockUpdate] Missing or invalid authorization header');
+      return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'missing_token' }) };
+    }
+
+    const accessToken = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: authError } = await supabase.auth.getUser(accessToken);
+
+    if (authError || !user) {
+      console.warn('⚠️ [StockUpdate] Invalid token or user not found:', authError?.message);
+      return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'invalid_token' }) };
+    }
+
+    console.log('✅ [StockUpdate] User authenticated:', user.id);
+
+    // Load user role
+    const { data: profile, error: profileError } = await supabaseService
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      console.error('❌ [StockUpdate] Error loading user profile:', profileError);
+      return { statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error: 'profile_load_failed' }) };
+    }
+
+    const userRole = profile?.role || 'MAGASIN';
+    console.log('👤 [StockUpdate] User role:', userRole);
+
+    // Only ADMIN_FULL and ADMIN can push price updates
+    const allowedRoles = ['ADMIN_FULL', 'ADMIN'];
+    if (!allowedRoles.includes(userRole)) {
+      console.warn('⚠️ [StockUpdate] User role not authorized for price/stock updates:', userRole);
+      return { statusCode: 403, headers: JSON_HEADERS, body: JSON.stringify({ error: 'insufficient_role' }) };
+    }
+
+    console.log('✅ [StockUpdate] Permission granted for price/stock update');
+
     let body: any = {};
     try { body = event.body ? JSON.parse(event.body) : {}; } catch { return { statusCode: 400, headers: JSON_HEADERS, body: JSON.stringify({ error: 'bad_json' }) }; }
 
@@ -119,6 +161,25 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
 
     const chunkSize = 25;
     const results: any[] = [];
+
+    // Pre-filter to SKUs that are actually listed on eBay for this account (avoid silent "offer not found")
+    let listedSkus = new Set<string>();
+    try {
+      const { data: listedOffers } = await supabaseService
+        .from('marketplace_listings')
+        .select('remote_sku')
+        .eq('provider', 'ebay')
+        .eq('marketplace_account_id', account_id);
+      if (Array.isArray(listedOffers)) {
+        listedSkus = new Set(
+          listedOffers
+            .map((o: any) => (o?.remote_sku ?? '').toString().trim())
+            .filter((s: string) => s.length > 0)
+        );
+      }
+    } catch {
+      // proceed without filtering if query fails
+    }
 
     const ensureRefreshedToken = async (): Promise<string | null> => {
       if (!tokenRow.encryption_iv && tokenRow.refresh_token_encrypted?.includes('"iv"')) {
@@ -177,12 +238,30 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
           expires_at: refreshed.expires_in ? new Date(Date.now() + refreshed.expires_in * 1000).toISOString() : tokenRow.expires_at || null
         })
         .eq('marketplace_account_id', account_id);
+
+      // Mark account as healthy (no reauth needed) after a successful refresh
+      await supabaseService
+        .from('marketplace_accounts')
+        .update({ needs_reauth: false, updated_at: new Date().toISOString() } as any)
+        .eq('id', account_id as any);
+
       return refreshed.access_token;
     };
 
     for (let i = 0; i < items.length; i += chunkSize) {
-      const batch = items.slice(i, i + chunkSize)
+      const batchAll = items.slice(i, i + chunkSize)
         .filter((it: any) => it && typeof it.sku === 'string' && it.sku.trim().length > 0 && typeof it.quantity === 'number');
+
+      // Mark immediately as FAILED the SKUs not listed on eBay for this account
+      const invalid = batchAll.filter((it: any) => !listedSkus.has((it.sku || '').toString().trim()));
+      invalid.forEach((b: any) => results.push({
+        sku: b.sku,
+        status: 'FAILED',
+        errors: [{ message: 'not_listed_on_ebay' }]
+      }));
+
+      // Only send the SKUs that are actually listed
+      const batch = batchAll.filter((it: any) => listedSkus.has((it.sku || '').toString().trim()));
 
       if (batch.length === 0) continue;
 
@@ -199,6 +278,13 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
       if (resp.status === 401) {
         const newToken = await ensureRefreshedToken();
         if (!newToken) {
+          // Mark account as requiring reauth when refresh is impossible
+          try {
+            await supabaseService
+              .from('marketplace_accounts')
+              .update({ needs_reauth: true, updated_at: new Date().toISOString() } as any)
+              .eq('id', account_id as any);
+          } catch {}
           batch.forEach((b: any) => results.push({ sku: b.sku, status: 'FAILED', errors: [{ message: 'token_expired' }] }));
           continue;
         }
@@ -238,7 +324,12 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
             });
           });
         } else {
-          batch.forEach((b: any) => results.push({ sku: b.sku, status: 'SUCCESS' }));
+          // No per-SKU responses from eBay; do NOT mark success silently
+          batch.forEach((b: any) => results.push({
+            sku: b.sku,
+            status: 'FAILED',
+            errors: [{ message: 'no_responses_from_ebay' }]
+          }));
         }
       }
     }

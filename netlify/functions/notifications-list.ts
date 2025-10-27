@@ -1,0 +1,101 @@
+// Netlify Function: notifications-list
+// Endpoint pour lister les notifications de l'utilisateur
+
+export const handler = async (event: any) => {
+  const { createClient } = await import('@supabase/supabase-js');
+
+  const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
+  const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
+  const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+
+  const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+
+  try {
+    console.log('[notifications-list] Début de la requête');
+
+    if (event.httpMethod !== 'GET') {
+      return {
+        statusCode: 405,
+        body: JSON.stringify({ error: 'method_not_allowed' })
+      };
+    }
+
+    // Authentification
+    const authHeader = event.headers.authorization || event.headers.Authorization || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      return {
+        statusCode: 401,
+        body: JSON.stringify({ error: 'unauthorized' })
+      };
+    }
+
+    const token = authHeader.substring(7);
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      global: { headers: { Authorization: `Bearer ${token}` } }
+    });
+
+    const { data: { user }, error: userError } = await supabase.auth.getUser();
+    if (userError || !user) {
+      return {
+        statusCode: 401,
+        body: JSON.stringify({ error: 'unauthorized' })
+      };
+    }
+
+    console.log('[notifications-list] Utilisateur:', user.id);
+
+    // Paramètres
+    const qs = event.queryStringParameters || {};
+    const unreadOnly = qs.unread_only === '1';
+
+    console.log('[notifications-list] Paramètres:', { unreadOnly });
+
+    // Charger les notifications de l'utilisateur + notifications globales
+    let query = supabaseService
+      .from('notifications')
+      .select('*')
+      .or(`user_id.eq.${user.id},user_id.is.null`)
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (unreadOnly) {
+      query = query.eq('read', false);
+    }
+
+    const { data: notifications, error: notifError } = await query;
+
+    if (notifError) {
+      console.error('[notifications-list] Erreur chargement notifications:', notifError);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'notifications_error', message: notifError.message })
+      };
+    }
+
+    console.log('[notifications-list] Notifications chargées:', notifications?.length || 0);
+
+    // Compter les non lues
+    const unreadCount = (notifications || []).filter((n: any) => !n.read).length;
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+      },
+      body: JSON.stringify({
+        ok: true,
+        notifications: notifications || [],
+        unread_count: unreadCount
+      })
+    };
+
+  } catch (error: any) {
+    console.error('[notifications-list] Erreur globale:', error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: 'internal_error', message: error.message })
+    };
+  }
+};
