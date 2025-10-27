@@ -410,7 +410,7 @@ function App() {
         console.log('[Notifications] Chargement des notifications');
 
         // Charger les notifications
-        const notifUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/notifications-list?unread_only=1`;
+        const notifUrl = `/.netlify/functions/notifications-list?unread_only=1`;
         const notifResponse = await fetch(notifUrl, {
           headers: {
             'Authorization': `Bearer ${session.access_token}`,
@@ -426,7 +426,7 @@ function App() {
         }
 
         // Charger le montant dû depuis consignments
-        const consigUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/consignments-list`;
+        const consigUrl = `/.netlify/functions/consignments-list`;
         const consigResponse = await fetch(consigUrl, {
           headers: {
             'Authorization': `Bearer ${session.access_token}`,
@@ -504,7 +504,7 @@ function App() {
   }
 
   const renderContent = () => {
-    const content = (() => {
+    const content: React.ReactNode = (() => {
       switch (currentPage) {
         case 'select-type':
           return isAdminUser ? <ProductTypeSelection /> : <div className="p-6">Accès non autorisé</div>;
@@ -1306,7 +1306,7 @@ function App() {
                   )}
                 </div>
                 <span>Montant du : {montantDu.toFixed(2)} €</span>
-                <span>Total : {metrics?.monthlyTurnover?.toFixed(2) ?? '0.00'} €</span>
+                <span>Total : {Number(metrics?.totalRevenue ?? 0).toFixed(2)} €</span>
                 {userEmail && (
                   <div className="flex items-center space-x-3 ml-4 pl-4 border-l border-white/30">
                     <div className="flex items-center space-x-2">
