@@ -345,14 +345,11 @@ export const handler = async (event: any) => {
 
     {
       const redirectLocation = `/pricing?provider=ebay${(typeof insufficientScopes !== 'undefined' && insufficientScopes) ? '&connected=0&reason=insufficient_scope' : '&connected=1'}`;
-      const cookieVal = (typeof insufficientScopes !== 'undefined' && insufficientScopes) ? 'reauth' : 'connected';
-      const setCookie = buildCookie('ebay', cookieVal, 300);
       return {
         statusCode: 302,
         headers: {
           ...buildCorsHeaders(),
-          'Location': redirectLocation,
-          'Set-Cookie': setCookie
+          'Location': redirectLocation
         },
         body: ''
       };
