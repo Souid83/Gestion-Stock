@@ -4,9 +4,45 @@
 export const handler = async (event: any) => {
   const { createClient } = await import('@supabase/supabase-js');
 
+  // Fixed CORS origin per requirements
+  const ALLOW_ORIGIN = 'https://dev-gestockflow.netlify.app';
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': ALLOW_ORIGIN,
+    'Access-Control-Allow-Credentials': 'true'
+  };
+
+  // CORS preflight (fixed headers)
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 204,
+      headers: {
+        ...corsHeaders,
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'content-type, authorization'
+      },
+      body: ''
+    };
+  }
+
   const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
   const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
   const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+
+  // Validate required envs before proceeding
+  const missingEnv: string[] = [];
+  if (!SUPABASE_URL) missingEnv.push('SUPABASE_URL');
+  if (!SUPABASE_SERVICE_KEY) missingEnv.push('SUPABASE_SERVICE_ROLE_KEY');
+
+  if (missingEnv.length > 0) {
+    return {
+      statusCode: 500,
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ error: 'missing_env', missing: missingEnv })
+    };
+  }
 
   const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
@@ -17,6 +53,10 @@ export const handler = async (event: any) => {
     if (event.httpMethod !== 'GET') {
       return {
         statusCode: 405,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'method_not_allowed' })
       };
     }
@@ -27,6 +67,10 @@ export const handler = async (event: any) => {
       console.log('[consignments-list] Pas de token Bearer');
       return {
         statusCode: 401,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'unauthorized', message: 'Token manquant' })
       };
     }
@@ -42,6 +86,10 @@ export const handler = async (event: any) => {
       console.log('[consignments-list] Erreur auth user:', userError);
       return {
         statusCode: 401,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'unauthorized', message: 'Token invalide' })
       };
     }
@@ -59,6 +107,10 @@ export const handler = async (event: any) => {
       console.error('[consignments-list] Erreur récupération profil:', profileError);
       return {
         statusCode: 500,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'profile_error', message: profileError.message })
       };
     }
@@ -71,6 +123,10 @@ export const handler = async (event: any) => {
       console.log('[consignments-list] Accès refusé pour COMMANDE');
       return {
         statusCode: 403,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'forbidden', message: 'Accès non autorisé pour ce rôle' })
       };
     }
@@ -110,6 +166,10 @@ export const handler = async (event: any) => {
       console.error('[consignments-list] Erreur chargement synthèse:', summaryError);
       return {
         statusCode: 500,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'summary_error', message: summaryError.message })
       };
     }
@@ -190,9 +250,9 @@ export const handler = async (event: any) => {
     return {
       statusCode: 200,
       headers: {
+        ...corsHeaders,
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+        'Access-Control-Allow-Headers': 'content-type, authorization'
       },
       body: JSON.stringify(response)
     };
@@ -201,6 +261,10 @@ export const handler = async (event: any) => {
     console.error('[consignments-list] Erreur globale:', error);
     return {
       statusCode: 500,
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({
         error: 'internal_error',
         message: error.message || 'Erreur interne du serveur'
