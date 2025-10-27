@@ -89,15 +89,18 @@ export const handler = async (event: any) => {
 
     const { access_token, refresh_token, expires_in, scope, token_type } = data;
 
-    // Blocking checks
+    // Validate scopes but do not hard-fail; persist token and mark account for reauth if insufficient
     if (!refresh_token) {
       return { statusCode: 502, body: JSON.stringify({ reason: 'r0_detected_no_refresh_token' }) };
     }
     const scopeStr = typeof scope === 'string' ? scope : Array.isArray(scope) ? scope.join(' ') : '';
     const hasRequired = /\bsell\.inventory\b|\bsell\.account\b|\bsell\.fulfillment\b/.test(scopeStr);
+    let insufficientScopes = false;
     if (!hasRequired) {
-      return { statusCode: 403, body: JSON.stringify({ error: 'insufficient_scope' }) };
+      insufficientScopes = true;
+      console.warn('ebay_callback_insufficient_scope', { scope: scopeStr });
     }
+    console.log('eBay token meta', { token_type, scope: scopeStr, hasRequired });
 
     // --- Chiffrement AES-GCM (WebCrypto) du refresh token ---
     const encryptData = async (data: string): Promise<{ encrypted: string; iv: string }> => {
@@ -289,6 +292,17 @@ export const handler = async (event: any) => {
     }
 
     console.log("✅ OAuth tokens stored successfully");
+    // If scopes are insufficient, mark account as needing re-auth
+    try {
+      if (typeof insufficientScopes !== 'undefined' && insufficientScopes && accountId) {
+        await supabase
+          .from('marketplace_accounts')
+          .update({ needs_reauth: true, updated_at: new Date().toISOString() } as any)
+          .eq('id', accountId as any);
+      }
+    } catch (e) {
+      console.warn('⚠️ Failed to set needs_reauth on marketplace_accounts:', (e as any)?.message || e);
+    }
 
     // Consume the pending state
     try {
@@ -301,7 +315,7 @@ export const handler = async (event: any) => {
     return {
       statusCode: 302,
       headers: {
-        Location: "/pricing?provider=ebay&connected=1",
+        Location: `/pricing?provider=ebay${(typeof insufficientScopes !== 'undefined' && insufficientScopes) ? '&connected=0&reason=insufficient_scope' : '&connected=1'}`,
       },
     };
   } catch (err: any) {
