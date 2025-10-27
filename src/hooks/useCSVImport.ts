@@ -1,51 +1,105 @@
 /**
  * useCSVImport Hook
- * Custom hook for CSV import functionality
+ * Centralized import dialog state and helpers used across pages
  */
 
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 
-interface UseCSVImportResult {
-  importing: boolean;
-  progress: number;
-  error: string | null;
-  importCSV: (file: File, onProgress?: (progress: number) => void) => Promise<void>;
+export interface ImportErrorItem {
+  line: number;
+  message: string;
 }
 
+export interface ImportState {
+  isDialogOpen: boolean;
+  current: number;
+  total: number;
+  status: string; // e.g., 'En cours...', 'Terminé', 'Erreurs'
+  errors: ImportErrorItem[];
+  successMessage: string | null;
+}
+
+export interface UseCSVImportResult {
+  importState: ImportState;
+  startImport: (total: number, status?: string) => void;
+  incrementProgress: (step?: number) => void;
+  setImportSuccess: (message: string) => void;
+  setImportError: (errors: ImportErrorItem[]) => void;
+  closeDialog: () => void;
+}
+
+const initialState: ImportState = {
+  isDialogOpen: false,
+  current: 0,
+  total: 0,
+  status: 'En cours...',
+  errors: [],
+  successMessage: null,
+};
+
+/**
+ * Provides a stable API expected by multiple pages:
+ * - importState.isDialogOpen, current, total, status, errors, successMessage
+ * - startImport(total), incrementProgress(), setImportSuccess(msg), setImportError(errors), closeDialog()
+ */
 export function useCSVImport(): UseCSVImportResult {
-  const [importing, setImporting] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [error, setError] = useState<string | null>(null);
+  const [state, setState] = useState<ImportState>(initialState);
 
-  const importCSV = async (file: File, onProgress?: (progress: number) => void) => {
-    console.log('[useCSVImport] Starting CSV import:', file.name);
-    setImporting(true);
-    setProgress(0);
-    setError(null);
+  const startImport = useCallback((total: number, status: string = 'En cours...') => {
+    setState({
+      isDialogOpen: true,
+      current: 0,
+      total: Math.max(0, Number(total) || 0),
+      status,
+      errors: [],
+      successMessage: null,
+    });
+  }, []);
 
-    try {
-      // Simulate progress
-      for (let i = 0; i <= 100; i += 10) {
-        setProgress(i);
-        if (onProgress) {
-          onProgress(i);
-        }
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
+  const incrementProgress = useCallback((step: number = 1) => {
+    setState((prev) => {
+      const nextCurrent = Math.min(prev.total, prev.current + (Number(step) || 1));
+      const done = prev.total > 0 && nextCurrent >= prev.total;
+      return {
+        ...prev,
+        current: nextCurrent,
+        status: done ? (prev.successMessage ? 'Terminé' : prev.status) : prev.status,
+      };
+    });
+  }, []);
 
-      console.log('[useCSVImport] CSV import completed');
-    } catch (err) {
-      console.error('[useCSVImport] Error importing CSV:', err);
-      setError(err instanceof Error ? err.message : 'Erreur lors de l\'importation');
-    } finally {
-      setImporting(false);
-    }
-  };
+  const setImportSuccess = useCallback((message: string) => {
+    setState((prev) => ({
+      ...prev,
+      successMessage: message,
+      status: 'Terminé',
+      // keep dialog open so the user can review the message then close
+      isDialogOpen: true,
+    }));
+  }, []);
+
+  const setImportError = useCallback((errors: ImportErrorItem[]) => {
+    setState((prev) => ({
+      ...prev,
+      errors: Array.isArray(errors) ? errors : [],
+      status: 'Erreurs',
+      isDialogOpen: true,
+    }));
+  }, []);
+
+  const closeDialog = useCallback(() => {
+    setState((prev) => ({
+      ...prev,
+      isDialogOpen: false,
+    }));
+  }, []);
 
   return {
-    importing,
-    progress,
-    error,
-    importCSV,
+    importState: state,
+    startImport,
+    incrementProgress,
+    setImportSuccess,
+    setImportError,
+    closeDialog,
   };
 }
