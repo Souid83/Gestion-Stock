@@ -28,6 +28,23 @@ export const handler = async (event: any) => {
   const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
   const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
+  // Validate required env vars to avoid opaque 500s
+  const missingEnv: string[] = [];
+  if (!SUPABASE_URL) missingEnv.push('SUPABASE_URL');
+  if (!SUPABASE_ANON_KEY) missingEnv.push('VITE_SUPABASE_ANON_KEY');
+  if (!SUPABASE_SERVICE_KEY) missingEnv.push('SUPABASE_SERVICE_ROLE_KEY');
+
+  if (missingEnv.length > 0) {
+    return {
+      statusCode: 500,
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ error: 'missing_env', missing: missingEnv })
+    };
+  }
+
   const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
   try {
