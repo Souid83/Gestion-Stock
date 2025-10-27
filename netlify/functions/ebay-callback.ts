@@ -34,7 +34,7 @@ export const handler = async (event: any) => {
     // --- Variables d’environnement (Production) ---
     const clientId = process.env.EBAY_APP_ID;
     const clientSecret = process.env.EBAY_CERT_ID;
-    const ruName = process.env.EBAY_RUNAME;
+    const ruName = environment === 'sandbox' ? process.env.EBAY_RUNAME_SANDBOX : process.env.EBAY_RUNAME_PROD;
     const secretKey = process.env.SECRET_KEY || "";
     const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -89,6 +89,16 @@ export const handler = async (event: any) => {
 
     const { access_token, refresh_token, expires_in, scope, token_type } = data;
 
+    // Blocking checks
+    if (!refresh_token) {
+      return { statusCode: 502, body: JSON.stringify({ reason: 'r0_detected_no_refresh_token' }) };
+    }
+    const scopeStr = typeof scope === 'string' ? scope : Array.isArray(scope) ? scope.join(' ') : '';
+    const hasRequired = /\bsell\.inventory\b|\bsell\.account\b|\bsell\.fulfillment\b/.test(scopeStr);
+    if (!hasRequired) {
+      return { statusCode: 403, body: JSON.stringify({ error: 'insufficient_scope' }) };
+    }
+
     // --- Chiffrement AES-GCM (WebCrypto) du refresh token ---
     const encryptData = async (data: string): Promise<{ encrypted: string; iv: string }> => {
       if (!secretKey) {
@@ -123,6 +133,32 @@ export const handler = async (event: any) => {
       return { statusCode: 500, body: JSON.stringify({ error: "missing_supabase_env" }) };
     }
     const supabase = createClient(supabaseUrl as string, supabaseKey as string);
+
+    // Validate state nonce against pending oauth_tokens
+    let stateNonce: string | null = null;
+    try {
+      if (state) {
+        const decoded = JSON.parse(Buffer.from(state, 'base64url').toString());
+        stateNonce = typeof decoded?.n === 'string' ? decoded.n : null;
+      }
+    } catch {
+      // ignore
+    }
+    if (!stateNonce) {
+      return { statusCode: 401, body: JSON.stringify({ error: 'invalid_or_expired_state' }) };
+    }
+    const { data: pendingRow } = await supabase
+      .from('oauth_tokens')
+      .select('*')
+      .eq('state_nonce', stateNonce as any)
+      .eq('access_token', 'pending')
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
+    if (!pendingRow) {
+      // cleanup any stale rows with this nonce
+      try { await supabase.from('oauth_tokens').delete().eq('state_nonce', stateNonce as any); } catch {}
+      return { statusCode: 401, body: JSON.stringify({ error: 'invalid_or_expired_state' }) };
+    }
 
     // Ensure provider_app_credentials are available for this environment (used by stock-update refresh)
     try {
@@ -241,10 +277,10 @@ export const handler = async (event: any) => {
       encryption_iv: encryptedRefresh ? encryptedRefresh.iv : null,
       scope,
       token_type,
-      expires_at: new Date(Date.now() + (expires_in || 7200) * 1000).toISOString(),
+      expires_at: new Date(Date.now() + Math.max(0, ((expires_in || 7200) - 120) * 1000)).toISOString(),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-      state_nonce: state || "none",
+      state_nonce: stateNonce || "none",
     } as any);
 
     if (error) {
@@ -254,10 +290,18 @@ export const handler = async (event: any) => {
 
     console.log("✅ OAuth tokens stored successfully");
 
+    // Consume the pending state
+    try {
+      await supabase
+        .from('oauth_tokens')
+        .update({ access_token: 'consumed', updated_at: new Date().toISOString() } as any)
+        .eq('state_nonce', stateNonce as any);
+    } catch {}
+
     return {
       statusCode: 302,
       headers: {
-        Location: "https://dev-gestockflow.netlify.app/pricing?provider=ebay&connected=1",
+        Location: "/pricing?provider=ebay&connected=1",
       },
     };
   } catch (err: any) {
