@@ -89,7 +89,13 @@ export const handler = async (event: any) => {
     // redirect ONCE to our authorize function with prompt=consent, using an anti-loop cookie.
     const qs = (event as any).queryStringParameters || {};
     const referer = (event.headers as any)?.referer || (event.headers as any)?.Referer || '';
-    const isDevPortal = !state || state === '' || (typeof referer === 'string' && referer.includes('developer.ebay.com')) || qs.test === '1';
+
+    // Assouplir la détection DevPortal: n'activer que si le state est réellement manquant
+    const stateMissing = !state || state === '';
+    const fromDevPortal = typeof referer === 'string' && referer.includes('developer.ebay.com');
+    const forcedTest = qs.test === '1';
+    const isDevPortal = stateMissing && (fromDevPortal || forcedTest);
+
     if (isDevPortal) {
       console.warn('callback_state_missing_devportal');
       const cookieHeader = (event.headers as any)?.cookie || (event.headers as any)?.Cookie || '';
