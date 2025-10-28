@@ -153,7 +153,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
       ];
 
-      const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(ruNameFinal)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateNonce)}&prompt=${encodeURIComponent('consent')}`;
+      const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(ruNameFinal)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateNonce)}&prompt=${encodeURIComponent('login consent')}`;
 
       const safeUrl = authorizeUrl.replace(/([?&]state=)[^&]+/, '$1<hidden>');
       console.log('eBay authorize', { environment, url: safeUrl });
@@ -256,7 +256,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       : EBAY_PRODUCTION_AUTH_URL;
 
     // 👇 Forcer consent TEMPORAIREMENT le temps du debug
-    const prompt = 'consent';
+    const prompt = 'login consent';
 
     const scopes = [
       'https://api.ebay.com/oauth/api_scope',
