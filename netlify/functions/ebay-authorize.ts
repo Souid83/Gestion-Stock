@@ -147,6 +147,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
 
       const authBaseUrl = EBAY_PRODUCTION_AUTH_URL;
       const scopes = [
+        'https://api.ebay.com/oauth/api_scope',
         'https://api.ebay.com/oauth/api_scope/sell.account',
         'https://api.ebay.com/oauth/api_scope/sell.inventory',
         'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
@@ -258,6 +259,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     const prompt = 'consent';
 
     const scopes = [
+      'https://api.ebay.com/oauth/api_scope',
       'https://api.ebay.com/oauth/api_scope/sell.account',
       'https://api.ebay.com/oauth/api_scope/sell.inventory',
       'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
