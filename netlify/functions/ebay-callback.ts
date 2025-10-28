@@ -158,6 +158,8 @@ export const handler = async (event: any) => {
     const scopeStr = typeof scope === 'string' ? scope : Array.isArray(scope) ? scope.join(' ') : '';
     console.debug('token_debug', { hasScopeField: Object.prototype.hasOwnProperty.call(data, 'scope'), scopeLen: (scopeStr || '').length });
 
+    let privilegeOk = false;
+
     // Diagnostic temporaire: vérifier les privilèges SELL (status only, aucun secret loggé)
     try {
       const privilegeResp = await fetch(`${baseHost}/sell/account/v1/privilege`, {
@@ -167,6 +169,7 @@ export const handler = async (event: any) => {
           Accept: 'application/json'
         }
       });
+      privilegeOk = privilegeResp.status === 200;
       console.info('ebay_privilege_status', { status: privilegeResp.status });
     } catch {
       console.warn('ebay_privilege_status_error');
@@ -215,8 +218,8 @@ export const handler = async (event: any) => {
     }
     const supabase = createClient(supabaseUrl as string, supabaseKey as string);
 
-    // Re-consent flow if token_type invalid or scopes missing the required SELL scopes
-    if (token_type !== 'User Access Token' || !hasRequired || !scopeStr) {
+    // Re-consent flow if token_type invalid or missing SELL scopes AND privilege check failed
+    if (token_type !== 'User Access Token' || (!hasRequired && !privilegeOk)) {
       console.warn('ebay_callback_insufficient_scope', { token_type, scope: scopeStr });
 
       const cookieHeader = (event.headers as any)?.cookie || (event.headers as any)?.Cookie || '';
