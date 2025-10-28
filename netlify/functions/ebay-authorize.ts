@@ -152,9 +152,9 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
       ];
 
-      // Choix prompt: UNE seule valeur
+      // Choix prompt: UNE seule valeur (override possible via ?login=1)
       const q = (event as any).queryStringParameters || {};
-      const prompt = 'consent';
+      const prompt = q.login === '1' ? 'login' : 'consent';
 
       // Encodage: valeurs seulement (une fois)
       const redirect = encodeURIComponent(ruNameFinal);
@@ -278,9 +278,9 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       ? EBAY_SANDBOX_AUTH_URL
       : EBAY_PRODUCTION_AUTH_URL;
 
-    // Choix prompt: UNE seule valeur
+    // Choix prompt: UNE seule valeur (override possible via ?login=1)
     const q = (event as any).queryStringParameters || {};
-    const prompt = 'consent';
+    const prompt = q.login === '1' ? 'login' : 'consent';
 
     // Scopes ÉLARGIS (comme ancien code): base + SELL (+ readonly/finances/etc.)
     const scopesExpanded = (
@@ -341,11 +341,11 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       url: authorizeUrl.replace(/(state=)[^&]+/, '$1<hidden>')
     });
 
-    // Retourner 200 JSON (pattern ancien): le front fera la redirection
+    // Redirection directe (POST → 302 Location) pour éviter la friction côté front
     return {
-      statusCode: 200,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ authorizeUrl })
+      statusCode: 302,
+      headers: { Location: authorizeUrl },
+      body: ''
     };
 
   } catch (error: any) {
