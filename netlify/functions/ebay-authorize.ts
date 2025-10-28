@@ -261,12 +261,14 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
     ];
 
-    const promptParam = ((event as any)?.queryStringParameters?.reconsent === '1') ? 'consent' : 'login';
+    // Forcer consent si ?reconsent=1 ou ?test=1 (sur GET ou POST)
+    const promptParam = (qs.reconsent === '1' || qs.test === '1') ? 'consent' : 'login';
 
     const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(ruNameFinal)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateEncoded)}&prompt=${encodeURIComponent(promptParam)}`;
 
     const safeUrl = authorizeUrl.replace(/([?&]state=)[^&]+/, '$1<hidden>');
-    console.log('eBay authorize', { environment, url: safeUrl });
+    console.info('eBay authorize', { environment, url: safeUrl });
+    console.debug('authorize_params', { prompt: promptParam, hasState: true, hasScopes: scopes.join(' ').includes('sell.inventory') });
 
     // Redirect directly to eBay consent page (no cookies here)
     return {
