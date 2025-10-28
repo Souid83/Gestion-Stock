@@ -347,7 +347,7 @@ export const handler = async (event: any) => {
       const redirectLocation = `/pricing?provider=ebay${(typeof insufficientScopes !== 'undefined' && insufficientScopes) ? '&connected=0&reason=insufficient_scope' : '&connected=1'}`;
       // Set a short-lived host-only cookie to reflect connection status (no Domain, Path=/, HttpOnly, SameSite=Lax; Secure if HTTPS)
       const cookieVal = (typeof insufficientScopes !== 'undefined' && insufficientScopes) ? 'reauth' : 'connected';
-      const setCookie = buildCookie('ebay_oauth_status', cookieVal, 300);
+      const setCookie = buildCookie('ebay', cookieVal, 300);
       return {
         statusCode: 302,
         headers: {
