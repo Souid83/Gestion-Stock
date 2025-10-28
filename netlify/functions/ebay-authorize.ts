@@ -103,7 +103,10 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
   });
 
   try {
-    if (event.httpMethod !== 'POST') {
+    const qs = (event as any).queryStringParameters || {};
+    const isTestGet = event.httpMethod === 'GET' && qs.test === '1';
+
+    if (!isTestGet && event.httpMethod !== 'POST') {
       return {
         statusCode: 405,
         body: JSON.stringify({ error: 'method_not_allowed' })
@@ -115,6 +118,51 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       return {
         statusCode: 403,
         body: JSON.stringify({ error: 'forbidden' })
+      };
+    }
+
+    // Explicit test mode (GET ?test=1) → re-amorçage propre avec prompt=consent (PRODUCTION)
+    if (isTestGet) {
+      const environment = 'production';
+      const client_id = process.env.EBAY_APP_ID || '';
+      const ruNameFinal = process.env.EBAY_RUNAME_PROD || '';
+      if (!client_id || !ruNameFinal) {
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: 'server_error', hint: 'Missing EBAY_APP_ID or EBAY_RUNAME_PROD for test=1' })
+        };
+      }
+
+      const stateNonce = generateStateNonce();
+      // Insérer un state pending comme dans le flux normal
+      await supabase
+        .from('oauth_tokens')
+        .insert({
+          marketplace_account_id: null,
+          access_token: 'pending',
+          state_nonce: stateNonce,
+          expires_at: new Date(Date.now() + 600000).toISOString(),
+          updated_at: new Date().toISOString()
+        });
+
+      const authBaseUrl = EBAY_PRODUCTION_AUTH_URL;
+      const scopes = [
+        'https://api.ebay.com/oauth/api_scope/sell.account',
+        'https://api.ebay.com/oauth/api_scope/sell.inventory',
+        'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
+      ];
+
+      const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(ruNameFinal)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateNonce)}&prompt=${encodeURIComponent('consent')}`;
+
+      const safeUrl = authorizeUrl.replace(/([?&]state=)[^&]+/, '$1<hidden>');
+      console.log('eBay authorize', { environment, url: safeUrl });
+
+      return {
+        statusCode: 302,
+        headers: {
+          Location: authorizeUrl
+        },
+        body: ''
       };
     }
 
@@ -182,22 +230,6 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       console.warn('[eBay Authorize] RUName not set in env for', environment, '- falling back to request body runame.');
     }
 
-    const { encrypted: encryptedClientId, iv } = await encryptData(client_id);
-    const { encrypted: encryptedClientSecret } = await encryptData(client_secret);
-
-    await supabase
-      .from('provider_app_credentials')
-      .upsert({
-        provider: 'ebay',
-        environment,
-        client_id_encrypted: encryptedClientId,
-        client_secret_encrypted: encryptedClientSecret,
-        runame: ruNameFinal,
-        encryption_iv: iv,
-        updated_at: new Date().toISOString()
-      }, {
-        onConflict: 'provider,environment'
-      });
 
     const stateNonce = generateStateNonce();
     // Encoder dans state: nonce + environment + (optionnel) account_id pour reconnection
@@ -222,14 +254,16 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       ? EBAY_SANDBOX_AUTH_URL
       : EBAY_PRODUCTION_AUTH_URL;
 
-    // Required SELL scopes only (no client_credentials here)
+    // Required SELL scopes only (space-separated, no commas; single encoding)
     const scopes = [
       'https://api.ebay.com/oauth/api_scope/sell.account',
       'https://api.ebay.com/oauth/api_scope/sell.inventory',
       'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
     ];
 
-    const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(ruNameFinal)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateEncoded)}&prompt=login`;
+    const promptParam = ((event as any)?.queryStringParameters?.reconsent === '1') ? 'consent' : 'login';
+
+    const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(ruNameFinal)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateEncoded)}&prompt=${encodeURIComponent(promptParam)}`;
 
     const safeUrl = authorizeUrl.replace(/([?&]state=)[^&]+/, '$1<hidden>');
     console.log('eBay authorize', { environment, url: safeUrl });

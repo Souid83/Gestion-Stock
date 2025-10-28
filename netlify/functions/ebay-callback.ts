@@ -85,6 +85,56 @@ export const handler = async (event: any) => {
     }
     const redirectFull: string = ruName;
 
+    // DevPortal/test tolerance: if state is missing/invalid (e.g., Developer Portal "Test Sign-in") or ?test=1, re-amorce vers authorize (prompt=consent)
+    const qs = (event as any).queryStringParameters || {};
+    const referer = (event.headers as any)?.referer || (event.headers as any)?.Referer || '';
+    const isDevPortal = !state || state === '' || (typeof referer === 'string' && referer.includes('developer.ebay.com')) || qs.test === '1';
+    if (isDevPortal) {
+      console.info('callback_state_missing_devportal', { hasState: !!state, referer: referer || '' });
+      const genNonce = () => {
+        const buf = new Uint8Array(32);
+        (globalThis.crypto || (crypto as any)).getRandomValues(buf);
+        return Buffer.from(buf).toString('base64url');
+      };
+      const newState = genNonce();
+      try {
+        const supabaseTmp = createClient(supabaseUrl as string, supabaseKey as string);
+        await supabaseTmp
+          .from('oauth_tokens')
+          .insert({
+            marketplace_account_id: null,
+            access_token: 'pending',
+            state_nonce: newState,
+            expires_at: new Date(Date.now() + 600000).toISOString(),
+            updated_at: new Date().toISOString()
+          } as any);
+      } catch {}
+
+      const authBaseUrl = 'https://auth.ebay.com/oauth2/authorize';
+      const scopes = [
+        'https://api.ebay.com/oauth/api_scope/sell.account',
+        'https://api.ebay.com/oauth/api_scope/sell.inventory',
+        'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
+      ].join(' ');
+      const authorizeUrl =
+        `${authBaseUrl}?client_id=${encodeURIComponent(String(clientId || ''))}` +
+        `&response_type=code` +
+        `&redirect_uri=${encodeURIComponent(redirectFull)}` +
+        `&scope=${encodeURIComponent(scopes)}` +
+        `&state=${encodeURIComponent(newState)}` +
+        `&prompt=consent&err=${encodeURIComponent('state')}`;
+
+      const reauthCookie = buildCookie('gf_ebay', 'reauth', 300);
+      return {
+        statusCode: 302,
+        headers: {
+          ...buildCorsHeaders(),
+          'Location': authorizeUrl,
+          'Set-Cookie': reauthCookie
+        },
+        body: ''
+      };
+    }
 
     const body = new URLSearchParams({
       grant_type: "authorization_code",
@@ -168,6 +218,57 @@ export const handler = async (event: any) => {
     }
     const supabase = createClient(supabaseUrl as string, supabaseKey as string);
 
+    // Re-consent flow if token_type invalid or scopes missing the required SELL scopes
+    if (token_type !== 'User Access Token' || !hasRequired || !scopeStr) {
+      console.warn('ebay_callback_insufficient_scope', { token_type, scope: scopeStr });
+
+      // Generate a fresh state nonce and insert a pending row for the new round-trip
+      const genNonce = () => {
+        const buf = new Uint8Array(32);
+        (globalThis.crypto || (crypto as any)).getRandomValues(buf);
+        return Buffer.from(buf).toString('base64url');
+      };
+      const newState = genNonce();
+      try {
+        await supabase
+          .from('oauth_tokens')
+          .insert({
+            marketplace_account_id: null,
+            access_token: 'pending',
+            state_nonce: newState,
+            expires_at: new Date(Date.now() + 600000).toISOString(),
+            updated_at: new Date().toISOString()
+          } as any);
+      } catch {}
+
+      // Build production authorize URL with prompt=consent and error hint
+      const authBaseUrl = 'https://auth.ebay.com/oauth2/authorize';
+      const scopes = [
+        'https://api.ebay.com/oauth/api_scope/sell.account',
+        'https://api.ebay.com/oauth/api_scope/sell.inventory',
+        'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
+      ].join(' ');
+      const err = token_type !== 'User Access Token' ? 'token_type' : 'insufficient_scope';
+      const authorizeUrl =
+        `${authBaseUrl}?client_id=${encodeURIComponent(String(clientId || ''))}` +
+        `&response_type=code` +
+        `&redirect_uri=${encodeURIComponent(redirectFull)}` +
+        `&scope=${encodeURIComponent(scopes)}` +
+        `&state=${encodeURIComponent(newState)}` +
+        `&prompt=consent&err=${encodeURIComponent(err)}`;
+
+      const reauthCookie = buildCookie('gf_ebay', 'reauth', 300);
+      return {
+        statusCode: 302,
+        headers: {
+          ...buildCorsHeaders(),
+          'Location': authorizeUrl,
+          'Set-Cookie': reauthCookie
+        },
+        body: ''
+      };
+    }
+
     // Validate state nonce against pending oauth_tokens
     let stateNonce: string | null = null;
     try {
@@ -179,7 +280,49 @@ export const handler = async (event: any) => {
       // ignore
     }
     if (!stateNonce) {
-      return { statusCode: 401, headers: buildCorsHeaders(), body: JSON.stringify({ error: 'invalid_or_expired_state' }) };
+      // No state → re-amorce authorize with prompt=consent (do not store tokens)
+      const genNonce = () => {
+        const buf = new Uint8Array(32);
+        (globalThis.crypto || (crypto as any)).getRandomValues(buf);
+        return Buffer.from(buf).toString('base64url');
+      };
+      const newState = genNonce();
+      try {
+        await supabase
+          .from('oauth_tokens')
+          .insert({
+            marketplace_account_id: null,
+            access_token: 'pending',
+            state_nonce: newState,
+            expires_at: new Date(Date.now() + 600000).toISOString(),
+            updated_at: new Date().toISOString()
+          } as any);
+      } catch {}
+
+      const authBaseUrl = 'https://auth.ebay.com/oauth2/authorize';
+      const scopes = [
+        'https://api.ebay.com/oauth/api_scope/sell.account',
+        'https://api.ebay.com/oauth/api_scope/sell.inventory',
+        'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
+      ].join(' ');
+      const authorizeUrl =
+        `${authBaseUrl}?client_id=${encodeURIComponent(String(clientId || ''))}` +
+        `&response_type=code` +
+        `&redirect_uri=${encodeURIComponent(redirectFull)}` +
+        `&scope=${encodeURIComponent(scopes)}` +
+        `&state=${encodeURIComponent(newState)}` +
+        `&prompt=consent&err=${encodeURIComponent('state')}`;
+
+      const reauthCookie = buildCookie('gf_ebay', 'reauth', 300);
+      return {
+        statusCode: 302,
+        headers: {
+          ...buildCorsHeaders(),
+          'Location': authorizeUrl,
+          'Set-Cookie': reauthCookie
+        },
+        body: ''
+      };
     }
     const { data: pendingRow } = await supabase
       .from('oauth_tokens')
@@ -191,55 +334,52 @@ export const handler = async (event: any) => {
     if (!pendingRow) {
       // cleanup any stale rows with this nonce
       try { await supabase.from('oauth_tokens').delete().eq('state_nonce', stateNonce as any); } catch {}
-      return { statusCode: 401, headers: buildCorsHeaders(), body: JSON.stringify({ error: 'invalid_or_expired_state' }) };
-    }
 
-    // Ensure provider_app_credentials are available for this environment (used by stock-update refresh)
-    try {
-      if (clientId && clientSecret) {
-        if (!secretKey) throw new Error("SECRET_KEY not configured");
-        // Build crypto key once
-        const keyBuffer = Buffer.from(secretKey, "base64");
-        const cryptoKey = await globalThis.crypto.subtle.importKey(
-          "raw",
-          keyBuffer,
-          { name: "AES-GCM", length: 256 },
-          false,
-          ["encrypt"]
-        );
-        // Generate ONE IV and use it for both fields so a single encryption_iv works
-        const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
-        const ivB64 = Buffer.from(iv).toString("base64");
-
-        const encryptWithSameIV = async (val: string): Promise<string> => {
-          const encryptedBuffer = await globalThis.crypto.subtle.encrypt(
-            { name: "AES-GCM", iv },
-            cryptoKey,
-            new TextEncoder().encode(val)
-          );
-          return Buffer.from(encryptedBuffer).toString("base64");
-        };
-
-        const encClientId = await encryptWithSameIV(String(clientId));
-        const encClientSecret = await encryptWithSameIV(String(clientSecret));
-
+      // State not recognized → re-amorce authorize with prompt=consent
+      const genNonce = () => {
+        const buf = new Uint8Array(32);
+        (globalThis.crypto || (crypto as any)).getRandomValues(buf);
+        return Buffer.from(buf).toString('base64url');
+      };
+      const newState = genNonce();
+      try {
         await supabase
-          .from('provider_app_credentials')
-          .upsert({
-            provider: 'ebay',
-            environment,
-            client_id_encrypted: encClientId,
-            client_secret_encrypted: encClientSecret,
-            runame: ruName,
-            encryption_iv: ivB64,
+          .from('oauth_tokens')
+          .insert({
+            marketplace_account_id: null,
+            access_token: 'pending',
+            state_nonce: newState,
+            expires_at: new Date(Date.now() + 600000).toISOString(),
             updated_at: new Date().toISOString()
-          } as any, {
-            onConflict: 'provider,environment'
           } as any);
-      }
-    } catch (e) {
-      console.warn('⚠️ provider_app_credentials upsert failed (non-blocking):', e);
+      } catch {}
+
+      const authBaseUrl = 'https://auth.ebay.com/oauth2/authorize';
+      const scopes = [
+        'https://api.ebay.com/oauth/api_scope/sell.account',
+        'https://api.ebay.com/oauth/api_scope/sell.inventory',
+        'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
+      ].join(' ');
+      const authorizeUrl =
+        `${authBaseUrl}?client_id=${encodeURIComponent(String(clientId || ''))}` +
+        `&response_type=code` +
+        `&redirect_uri=${encodeURIComponent(redirectFull)}` +
+        `&scope=${encodeURIComponent(scopes)}` +
+        `&state=${encodeURIComponent(newState)}` +
+        `&prompt=consent&err=${encodeURIComponent('state')}`;
+
+      const reauthCookie = buildCookie('gf_ebay', 'reauth', 300);
+      return {
+        statusCode: 302,
+        headers: {
+          ...buildCorsHeaders(),
+          'Location': authorizeUrl,
+          'Set-Cookie': reauthCookie
+        },
+        body: ''
+      };
     }
+
 
     // --- Upsert marketplace_accounts ---
     console.log("🔄 Resolving marketplace_account (preserve id if reconnect)...");
@@ -347,7 +487,7 @@ export const handler = async (event: any) => {
       const redirectLocation = `/pricing?provider=ebay${(typeof insufficientScopes !== 'undefined' && insufficientScopes) ? '&connected=0&reason=insufficient_scope' : '&connected=1'}`;
       // Set a short-lived host-only cookie to reflect connection status (no Domain, Path=/, HttpOnly, SameSite=Lax; Secure if HTTPS)
       const cookieVal = (typeof insufficientScopes !== 'undefined' && insufficientScopes) ? 'reauth' : 'connected';
-      const setCookie = buildCookie('ebay', cookieVal, 300);
+      const setCookie = buildCookie('gf_ebay', cookieVal, 300);
       return {
         statusCode: 302,
         headers: {
