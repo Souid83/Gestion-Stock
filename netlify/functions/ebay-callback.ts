@@ -65,7 +65,8 @@ export const handler = async (event: any) => {
     // --- Variables d’environnement (Production) ---
     const clientId = process.env.EBAY_APP_ID;
     const clientSecret = process.env.EBAY_CERT_ID;
-    const ruName = environment === 'sandbox' ? process.env.EBAY_RUNAME_SANDBOX : process.env.EBAY_RUNAME_PROD;
+    // Forcer RUName PRODUCTION pour éviter tout mismatch (encodé une seule fois dans le body via URLSearchParams)
+    const ruName = process.env.EBAY_RUNAME_PROD;
     const secretKey = process.env.SECRET_KEY || "";
     const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -120,19 +121,23 @@ export const handler = async (event: any) => {
       };
     }
 
-    const tokenScopes = 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment';
+    // PRODUCTION uniquement pour l'échange de code → token
+    const TOKEN_URL = 'https://api.ebay.com/identity/v1/oauth2/token';
+    const REQUIRED_SCOPES = [
+      'https://api.ebay.com/oauth/api_scope/sell.account',
+      'https://api.ebay.com/oauth/api_scope/sell.inventory',
+      'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
+    ];
 
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
-      redirect_uri: redirectFull,
-      scope: tokenScopes,
+      redirect_uri: redirectFull
     }).toString();
 
-    const baseHost = environment === 'sandbox' ? 'https://api.sandbox.ebay.com' : 'https://api.ebay.com';
-    console.log(`🌐 Requesting token from eBay ${environment.toUpperCase()}...`);
+    console.log(`🌐 Requesting token from eBay PRODUCTION...`);
 
-    const response = await fetch(`${baseHost}/identity/v1/oauth2/token`, {
+    const response = await fetch(TOKEN_URL, {
       method: "POST",
       headers: {
         Authorization: `Basic ${auth}`,
@@ -164,30 +169,14 @@ export const handler = async (event: any) => {
     const scopeStr = typeof scope === 'string' ? scope : Array.isArray(scope) ? scope.join(' ') : '';
     console.debug('token_debug', { hasScopeField: Object.prototype.hasOwnProperty.call(data, 'scope'), scopeLen: (scopeStr || '').length });
 
-    let privilegeOk = false;
-
-    // Diagnostic temporaire: vérifier les privilèges SELL (status only, aucun secret loggé)
-    try {
-      const privilegeResp = await fetch(`${baseHost}/sell/account/v1/privilege`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${access_token}`,
-          Accept: 'application/json'
-        }
-      });
-      privilegeOk = privilegeResp.status === 200;
-      console.info('ebay_privilege_status', { status: privilegeResp.status });
-    } catch {
-      console.warn('ebay_privilege_status_error');
-    }
-
-    const hasRequired = /\bsell\.inventory\b|\bsell\.account\b|\bsell\.fulfillment\b/.test(scopeStr);
-    let insufficientScopes = false;
-    if (!hasRequired) {
-      insufficientScopes = true;
-      console.warn('ebay_callback_insufficient_scope', { scope: scopeStr });
-    }
-    console.log('eBay token meta', { token_type, scope: scopeStr, hasRequired });
+    // Contrôle strict: exiger exactement les 3 scopes SELL requis
+    const hasAllScopes = REQUIRED_SCOPES.every(s => scopeStr.includes(s));
+    console.info('eBay token received', {
+      hasAccess: !!access_token,
+      hasRefresh: !!refresh_token,
+      scopeLen: scopeStr ? scopeStr.split(' ').length : 0,
+      hasAllScopes
+    });
 
     // --- Chiffrement AES-GCM (WebCrypto) du refresh token ---
     const encryptData = async (data: string): Promise<{ encrypted: string; iv: string }> => {
@@ -224,8 +213,8 @@ export const handler = async (event: any) => {
     }
     const supabase = createClient(supabaseUrl as string, supabaseKey as string);
 
-    // Re-consent flow if token_type invalid or missing SELL scopes AND privilege check failed
-    if (token_type !== 'User Access Token' || (!hasRequired && !privilegeOk)) {
+    // Re-consent strict si scopes insuffisants ou mauvais token_type
+    if (token_type !== 'User Access Token' || !hasAllScopes) {
       console.warn('ebay_callback_insufficient_scope', { token_type, scope: scopeStr });
 
       const cookieHeader = (event.headers as any)?.cookie || (event.headers as any)?.Cookie || '';
@@ -399,17 +388,6 @@ export const handler = async (event: any) => {
     }
 
     console.log("✅ OAuth tokens stored successfully");
-    // If scopes are insufficient, mark account as needing re-auth
-    try {
-      if (typeof insufficientScopes !== 'undefined' && insufficientScopes && accountId) {
-        await supabase
-          .from('marketplace_accounts')
-          .update({ needs_reauth: true, updated_at: new Date().toISOString() } as any)
-          .eq('id', accountId as any);
-      }
-    } catch (e) {
-      console.warn('⚠️ Failed to set needs_reauth on marketplace_accounts:', (e as any)?.message || e);
-    }
 
     // Consume the pending state
     try {
@@ -420,7 +398,7 @@ export const handler = async (event: any) => {
     } catch {}
 
     {
-      const redirectLocation = `/pricing?provider=ebay${(typeof insufficientScopes !== 'undefined' && insufficientScopes) ? '&connected=0&reason=insufficient_scope' : '&connected=1'}`;
+      const redirectLocation = `/pricing?provider=ebay&connected=1`;
       // Set a short-lived host-only cookie to reflect connection status (no Domain, Path=/, HttpOnly, SameSite=Lax; Secure if HTTPS)
       const cookieAttrs = `Path=/; HttpOnly; SameSite=Lax${isHttps ? '; Secure' : ''}`;
       const okCookie = `gf_ebay=connected; ${cookieAttrs}`;
