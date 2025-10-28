@@ -300,8 +300,9 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly'
     ].join(' ');
 
-    const ruNameProd = ruNameFinal;
-    const clientId = client_id;
+    // En PRODUCTION, forcer l'usage des identifiants d'environnement pour éviter "issued to another client"
+    const ruNameProd = environment === 'production' ? (process.env.EBAY_RUNAME_PROD || ruNameFinal) : ruNameFinal;
+    const clientId = environment === 'production' ? (process.env.EBAY_APP_ID || client_id) : client_id;
 
     // Encodage: valeurs seulement (une fois)
     const redirect = encodeURIComponent(ruNameProd);
