@@ -254,29 +254,43 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       ? EBAY_SANDBOX_AUTH_URL
       : EBAY_PRODUCTION_AUTH_URL;
 
-    // Required SELL scopes only (space-separated, no commas; single encoding)
+    // 👇 Forcer consent TEMPORAIREMENT le temps du debug
+    const prompt = 'consent';
+
     const scopes = [
       'https://api.ebay.com/oauth/api_scope/sell.account',
       'https://api.ebay.com/oauth/api_scope/sell.inventory',
-      'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
-    ];
+      'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+    ].join(' ');
 
-    // Forcer consent si ?reconsent=1 ou ?test=1 (sur GET ou POST)
-    const promptParam = (qs.reconsent === '1' || qs.test === '1') ? 'consent' : 'login';
+    const ruNameProd = ruNameFinal;
+    const clientId = client_id;
 
-    const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(ruNameFinal)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateEncoded)}&prompt=${encodeURIComponent(promptParam)}`;
+    const redirect = encodeURIComponent(ruNameProd);
+    const scopeParam = encodeURIComponent(scopes);
+    const stateParam = encodeURIComponent(stateNonce); // garder le state généré plus haut
 
-    const safeUrl = authorizeUrl.replace(/([?&]state=)[^&]+/, '$1<hidden>');
-    console.info('eBay authorize', { environment, url: safeUrl });
-    console.debug('authorize_params', { prompt: promptParam, hasState: true, hasScopes: scopes.join(' ').includes('sell.inventory') });
+    console.debug('authorize_query', (event as any).queryStringParameters || {});
+    console.debug('authorize_effective_prompt', { chosen: prompt });
 
-    // Redirect directly to eBay consent page (no cookies here)
+    const authUrl =
+      `https://auth.ebay.com/oauth2/authorize` +
+      `?client_id=${clientId}` +
+      `&response_type=code` +
+      `&redirect_uri=${redirect}` +
+      `&scope=${scopeParam}` +
+      `&state=${stateParam}` +
+      `&prompt=${prompt}`;
+
+    console.info('eBay authorize', {
+      environment: 'production',
+      url: authUrl.replace(/(state=)[^&]+/, '$1<hidden>'),
+    });
+
     return {
       statusCode: 302,
-      headers: {
-        Location: authorizeUrl
-      },
-      body: ''
+      headers: { Location: authUrl },
+      body: '',
     };
 
   } catch (error: any) {
