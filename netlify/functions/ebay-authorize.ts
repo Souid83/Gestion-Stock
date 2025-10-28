@@ -153,18 +153,42 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
       ];
 
-      const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(ruNameFinal)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateNonce)}&prompt=${encodeURIComponent('login consent')}`;
+      // Choix prompt: UNE seule valeur
+      const q = (event as any).queryStringParameters || {};
+      const prompt = (q.reconsent === '1') ? 'consent' : 'login';
+
+      // Encodage: valeurs seulement (une fois)
+      const redirect = encodeURIComponent(ruNameFinal);
+      const scopeParam = encodeURIComponent(scopes.join(' '));
+      const stateParam = encodeURIComponent(stateNonce);
+
+      // Logs de contrôle
+      console.debug('authorize_query', q);
+      console.debug('authorize_effective_prompt', { chosen: prompt });
+
+      // Construction finale (AUCUN autre &prompt ajouté ailleurs)
+      const authorizeUrl =
+        `https://auth.ebay.com/oauth2/authorize` +
+        `?client_id=${client_id}` +
+        `&response_type=code` +
+        `&redirect_uri=${redirect}` +
+        `&scope=${scopeParam}` +
+        `&state=${stateParam}` +
+        `&prompt=${prompt}`;
+
+      // Garde-fou: si jamais une concat a laissé 2 mots
+      if (/\blogin\s+consent\b|\bconsent\s+login\b/.test(authorizeUrl)) {
+        console.error('[authorize] prompt invalid détecté', { authUrlSample: authorizeUrl.slice(0, 120) + '...' });
+        throw new Error('authorize_prompt_invalid');
+      }
 
       const safeUrl = authorizeUrl.replace(/([?&]state=)[^&]+/, '$1<hidden>');
-      console.log('eBay authorize', { environment, url: safeUrl });
+      console.info('eBay authorize', {
+        environment: 'production',
+        url: safeUrl
+      });
 
-      return {
-        statusCode: 302,
-        headers: {
-          Location: authorizeUrl
-        },
-        body: ''
-      };
+      return { statusCode: 302, headers: { Location: authorizeUrl }, body: '' };
     }
 
     if (!event.body) {
@@ -255,9 +279,11 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       ? EBAY_SANDBOX_AUTH_URL
       : EBAY_PRODUCTION_AUTH_URL;
 
-    // 👇 Forcer consent TEMPORAIREMENT le temps du debug
-    const prompt = 'login consent';
+    // Choix prompt: UNE seule valeur
+    const q = (event as any).queryStringParameters || {};
+    const prompt = (q.reconsent === '1') ? 'consent' : 'login';
 
+    // Scopes: base + SELL (un espace entre chaque)
     const scopes = [
       'https://api.ebay.com/oauth/api_scope',
       'https://api.ebay.com/oauth/api_scope/sell.account',
@@ -268,32 +294,37 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     const ruNameProd = ruNameFinal;
     const clientId = client_id;
 
+    // Encodage: valeurs seulement (une fois)
     const redirect = encodeURIComponent(ruNameProd);
     const scopeParam = encodeURIComponent(scopes);
     const stateParam = encodeURIComponent(stateNonce); // garder le state généré plus haut
 
-    console.debug('authorize_query', (event as any).queryStringParameters || {});
+    // Logs de contrôle
+    console.debug('authorize_query', q);
     console.debug('authorize_effective_prompt', { chosen: prompt });
 
+    // Construction finale (AUCUN autre &prompt ajouté ailleurs)
     const authUrl =
-      `https://auth.ebay.com/oauth2/authorize` +
-      `?client_id=${clientId}` +
-      `&response_type=code` +
-      `&redirect_uri=${redirect}` +
-      `&scope=${scopeParam}` +
-      `&state=${stateParam}` +
-      `&prompt=${prompt}`;
+      'https://auth.ebay.com/oauth2/authorize'
+      + `?client_id=${clientId}`
+      + '&response_type=code'
+      + `&redirect_uri=${redirect}`
+      + `&scope=${scopeParam}`
+      + `&state=${stateParam}`
+      + `&prompt=${prompt}`;
+
+    // Garde-fou: si jamais une concat a laissé 2 mots
+    if (/\blogin\s+consent\b|\bconsent\s+login\b/.test(authUrl)) {
+      console.error('[authorize] prompt invalid détecté', { authUrlSample: authUrl.slice(0, 120) + '...' });
+      throw new Error('authorize_prompt_invalid');
+    }
 
     console.info('eBay authorize', {
       environment: 'production',
       url: authUrl.replace(/(state=)[^&]+/, '$1<hidden>'),
     });
 
-    return {
-      statusCode: 302,
-      headers: { Location: authUrl },
-      body: '',
-    };
+    return { statusCode: 302, headers: { Location: authUrl }, body: '' };
 
   } catch (error: any) {
     return {
