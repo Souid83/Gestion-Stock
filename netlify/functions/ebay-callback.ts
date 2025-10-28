@@ -4,12 +4,43 @@ import crypto from "crypto";
 export const handler = async (event: any) => {
   console.log("🟢 eBay Callback triggered");
 
+  const requestOrigin = (event?.headers && (event.headers.origin || (event.headers as any).Origin)) || '';
+  const frontendOrigin = process.env.FRONTEND_ORIGIN || requestOrigin || '';
+  const buildCorsHeaders = () => (frontendOrigin ? {
+    'Access-Control-Allow-Origin': frontendOrigin,
+    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin'
+  } : {});
+
+  // Preflight handler for CORS
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 204,
+      headers: {
+        ...buildCorsHeaders(),
+        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+      },
+      body: ''
+    };
+  }
+
+  const isHttps = (process.env.URL || '').startsWith('https://') || ((event?.headers || {})['x-forwarded-proto'] === 'https');
+  const envHint = (process.env.EBAY_ENVIRONMENT || process.env.EBAY_ENV || '').toLowerCase();
+  const isProd = isHttps || envHint === 'production';
+  const buildCookie = (name: string, value: string, maxAge = 300) => {
+    // Host-only cookie (no Domain), Path=/, HttpOnly, SameSite=Lax; add Secure only if HTTPS
+    let c = `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
+    if (isHttps) c += '; Secure';
+    return c;
+  };
+
   try {
     const url = new URL(event.rawUrl);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     if (!code) {
-      return { statusCode: 400, body: "Missing code" };
+      return { statusCode: 400, headers: buildCorsHeaders(), body: "Missing code" };
     }
 
     // Parse state payload (base64url) to preserve account_id and detect environment
@@ -34,7 +65,7 @@ export const handler = async (event: any) => {
     // --- Variables d’environnement (Production) ---
     const clientId = process.env.EBAY_APP_ID;
     const clientSecret = process.env.EBAY_CERT_ID;
-    const ruName = process.env.EBAY_RUNAME;
+    const ruName = environment === 'sandbox' ? process.env.EBAY_RUNAME_SANDBOX : process.env.EBAY_RUNAME_PROD;
     const secretKey = process.env.SECRET_KEY || "";
     const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -50,7 +81,7 @@ export const handler = async (event: any) => {
 
     // --- redirect complet obligatoire pour PROD ---
     if (!ruName) {
-      return { statusCode: 500, body: JSON.stringify({ error: "missing_runame" }) };
+      return { statusCode: 500, headers: buildCorsHeaders(), body: JSON.stringify({ error: "missing_runame" }) };
     }
     const redirectFull: string = ruName;
 
@@ -84,10 +115,23 @@ export const handler = async (event: any) => {
 
     if (!response.ok) {
       console.error("❌ eBay OAuth error:", data);
-      return { statusCode: 502, body: JSON.stringify({ ebay_error: data }) };
+      return { statusCode: 502, headers: buildCorsHeaders(), body: JSON.stringify({ ebay_error: data }) };
     }
 
     const { access_token, refresh_token, expires_in, scope, token_type } = data;
+
+    // Validate scopes but do not hard-fail; persist token and mark account for reauth if insufficient
+    if (!refresh_token) {
+      return { statusCode: 502, headers: buildCorsHeaders(), body: JSON.stringify({ reason: 'r0_detected_no_refresh_token' }) };
+    }
+    const scopeStr = typeof scope === 'string' ? scope : Array.isArray(scope) ? scope.join(' ') : '';
+    const hasRequired = /\bsell\.inventory\b|\bsell\.account\b|\bsell\.fulfillment\b/.test(scopeStr);
+    let insufficientScopes = false;
+    if (!hasRequired) {
+      insufficientScopes = true;
+      console.warn('ebay_callback_insufficient_scope', { scope: scopeStr });
+    }
+    console.log('eBay token meta', { token_type, scope: scopeStr, hasRequired });
 
     // --- Chiffrement AES-GCM (WebCrypto) du refresh token ---
     const encryptData = async (data: string): Promise<{ encrypted: string; iv: string }> => {
@@ -120,9 +164,35 @@ export const handler = async (event: any) => {
 
     // --- Insertion Supabase ---
     if (!supabaseUrl || !supabaseKey) {
-      return { statusCode: 500, body: JSON.stringify({ error: "missing_supabase_env" }) };
+      return { statusCode: 500, headers: buildCorsHeaders(), body: JSON.stringify({ error: "missing_supabase_env" }) };
     }
     const supabase = createClient(supabaseUrl as string, supabaseKey as string);
+
+    // Validate state nonce against pending oauth_tokens
+    let stateNonce: string | null = null;
+    try {
+      if (state) {
+        const decoded = JSON.parse(Buffer.from(state, 'base64url').toString());
+        stateNonce = typeof decoded?.n === 'string' ? decoded.n : null;
+      }
+    } catch {
+      // ignore
+    }
+    if (!stateNonce) {
+      return { statusCode: 401, headers: buildCorsHeaders(), body: JSON.stringify({ error: 'invalid_or_expired_state' }) };
+    }
+    const { data: pendingRow } = await supabase
+      .from('oauth_tokens')
+      .select('*')
+      .eq('state_nonce', stateNonce as any)
+      .eq('access_token', 'pending')
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
+    if (!pendingRow) {
+      // cleanup any stale rows with this nonce
+      try { await supabase.from('oauth_tokens').delete().eq('state_nonce', stateNonce as any); } catch {}
+      return { statusCode: 401, headers: buildCorsHeaders(), body: JSON.stringify({ error: 'invalid_or_expired_state' }) };
+    }
 
     // Ensure provider_app_credentials are available for this environment (used by stock-update refresh)
     try {
@@ -241,25 +311,53 @@ export const handler = async (event: any) => {
       encryption_iv: encryptedRefresh ? encryptedRefresh.iv : null,
       scope,
       token_type,
-      expires_at: new Date(Date.now() + (expires_in || 7200) * 1000).toISOString(),
+      expires_at: new Date(Date.now() + Math.max(0, ((expires_in || 7200) - 120) * 1000)).toISOString(),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-      state_nonce: state || "none",
+      state_nonce: stateNonce || "none",
     } as any);
 
     if (error) {
       console.error("❌ Supabase insert error:", error);
-      return { statusCode: 500, body: JSON.stringify({ insert_error: error }) };
+      return { statusCode: 500, headers: buildCorsHeaders(), body: JSON.stringify({ insert_error: error }) };
     }
 
     console.log("✅ OAuth tokens stored successfully");
+    // If scopes are insufficient, mark account as needing re-auth
+    try {
+      if (typeof insufficientScopes !== 'undefined' && insufficientScopes && accountId) {
+        await supabase
+          .from('marketplace_accounts')
+          .update({ needs_reauth: true, updated_at: new Date().toISOString() } as any)
+          .eq('id', accountId as any);
+      }
+    } catch (e) {
+      console.warn('⚠️ Failed to set needs_reauth on marketplace_accounts:', (e as any)?.message || e);
+    }
 
-    return {
-      statusCode: 302,
-      headers: {
-        Location: "https://dev-gestockflow.netlify.app/pricing?provider=ebay&connected=1",
-      },
-    };
+    // Consume the pending state
+    try {
+      await supabase
+        .from('oauth_tokens')
+        .update({ access_token: 'consumed', updated_at: new Date().toISOString() } as any)
+        .eq('state_nonce', stateNonce as any);
+    } catch {}
+
+    {
+      const redirectLocation = `/pricing?provider=ebay${(typeof insufficientScopes !== 'undefined' && insufficientScopes) ? '&connected=0&reason=insufficient_scope' : '&connected=1'}`;
+      // Set a short-lived host-only cookie to reflect connection status (no Domain, Path=/, HttpOnly, SameSite=Lax; Secure if HTTPS)
+      const cookieVal = (typeof insufficientScopes !== 'undefined' && insufficientScopes) ? 'reauth' : 'connected';
+      const setCookie = buildCookie('ebay_oauth_status', cookieVal, 300);
+      return {
+        statusCode: 302,
+        headers: {
+          ...buildCorsHeaders(),
+          'Location': redirectLocation,
+          'Set-Cookie': setCookie
+        },
+        body: ''
+      };
+    }
   } catch (err: any) {
     console.error("🔥 Callback fatal error:", err);
     return { statusCode: 500, body: JSON.stringify({ error: err.message }) };

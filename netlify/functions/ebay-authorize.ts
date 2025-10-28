@@ -125,13 +125,41 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       };
     }
 
-    const body: RequestBody = JSON.parse(event.body);
+    // Accept JSON or application/x-www-form-urlencoded bodies
+    let parsed: any = {};
+    const rawBody = event.body || '';
+    const contentType = (event.headers['content-type'] || event.headers['Content-Type'] || '').toLowerCase();
+
+    try {
+      if (contentType.includes('application/json')) {
+        parsed = JSON.parse(rawBody);
+      } else {
+        const params = new URLSearchParams(rawBody);
+        parsed = {
+          environment: params.get('environment') || undefined,
+          client_id: params.get('client_id') || undefined,
+          client_secret: params.get('client_secret') || undefined,
+          runame: params.get('runame') || undefined,
+          account_id: params.get('account_id') || undefined
+        };
+      }
+    } catch {
+      parsed = {};
+    }
+
+    const body: RequestBody = {
+      environment: parsed.environment,
+      client_id: parsed.client_id,
+      client_secret: parsed.client_secret,
+      runame: parsed.runame,
+      account_id: parsed.account_id
+    } as any;
     const { environment, client_id, client_secret, runame } = body;
 
-    if (!environment || !client_id || !client_secret || !runame) {
+    if (!environment || !client_id || !client_secret) {
       return {
         statusCode: 400,
-        body: JSON.stringify({ error: 'bad_request', hint: 'All fields are required' })
+        body: JSON.stringify({ error: 'bad_request', hint: 'Missing environment, client_id or client_secret' })
       };
     }
 
@@ -140,6 +168,18 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         statusCode: 400,
         body: JSON.stringify({ error: 'bad_request', hint: 'Invalid environment' })
       };
+    }
+
+    const ruNameEnv = environment === 'sandbox' ? (process.env.EBAY_RUNAME_SANDBOX || '') : (process.env.EBAY_RUNAME_PROD || '');
+    const ruNameFinal = ruNameEnv || runame || '';
+    if (!ruNameFinal) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'Missing RUName for environment and no runame provided' })
+      };
+    }
+    if (!ruNameEnv) {
+      console.warn('[eBay Authorize] RUName not set in env for', environment, '- falling back to request body runame.');
     }
 
     const { encrypted: encryptedClientId, iv } = await encryptData(client_id);
@@ -152,7 +192,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
         environment,
         client_id_encrypted: encryptedClientId,
         client_secret_encrypted: encryptedClientSecret,
-        runame,
+        runame: ruNameFinal,
         encryption_iv: iv,
         updated_at: new Date().toISOString()
       }, {
@@ -182,29 +222,26 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       ? EBAY_SANDBOX_AUTH_URL
       : EBAY_PRODUCTION_AUTH_URL;
 
+    // Include base scope + required SELL scopes (no client_credentials here)
     const scopes = [
       'https://api.ebay.com/oauth/api_scope',
-      'https://api.ebay.com/oauth/api_scope/sell.marketing.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.marketing',
-      'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.inventory',
-      'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
       'https://api.ebay.com/oauth/api_scope/sell.account',
-      'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
-      'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.finances',
-      'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
-      'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly'
+      'https://api.ebay.com/oauth/api_scope/sell.inventory',
+      'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
     ];
 
-    const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(runame)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateEncoded)}`;
+    const authorizeUrl = `${authBaseUrl}?client_id=${encodeURIComponent(client_id)}&response_type=code&redirect_uri=${encodeURIComponent(ruNameFinal)}&scope=${encodeURIComponent(scopes.join(' '))}&state=${encodeURIComponent(stateEncoded)}&prompt=login`;
 
+    const safeUrl = authorizeUrl.replace(/([?&]state=)[^&]+/, '$1<hidden>');
+    console.log('eBay authorize', { environment, url: safeUrl });
+
+    // Redirect directly to eBay consent page (no cookies here)
     return {
-      statusCode: 200,
-      body: JSON.stringify({
-        authorizeUrl
-      })
+      statusCode: 302,
+      headers: {
+        Location: authorizeUrl
+      },
+      body: ''
     };
 
   } catch (error: any) {

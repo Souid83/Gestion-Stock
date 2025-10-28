@@ -2,11 +2,48 @@
 // Endpoint pour lister les notifications de l'utilisateur
 
 export const handler = async (event: any) => {
+  // Fixed CORS origin per requirements (no dynamic origin here)
+  const ALLOW_ORIGIN = 'https://dev-gestockflow.netlify.app';
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': ALLOW_ORIGIN,
+    'Access-Control-Allow-Credentials': 'true'
+  };
+
+  // CORS preflight (fixed headers)
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 204,
+      headers: {
+        ...corsHeaders,
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'content-type, authorization'
+      },
+      body: ''
+    };
+  }
+
   const { createClient } = await import('@supabase/supabase-js');
 
   const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
   const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || '';
   const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+
+  // Validate required env vars to avoid opaque 500s
+  const missingEnv: string[] = [];
+  if (!SUPABASE_URL) missingEnv.push('SUPABASE_URL');
+  if (!SUPABASE_ANON_KEY) missingEnv.push('VITE_SUPABASE_ANON_KEY');
+  if (!SUPABASE_SERVICE_KEY) missingEnv.push('SUPABASE_SERVICE_ROLE_KEY');
+
+  if (missingEnv.length > 0) {
+    return {
+      statusCode: 500,
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ error: 'missing_env', missing: missingEnv })
+    };
+  }
 
   const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
@@ -16,6 +53,10 @@ export const handler = async (event: any) => {
     if (event.httpMethod !== 'GET') {
       return {
         statusCode: 405,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'method_not_allowed' })
       };
     }
@@ -25,6 +66,10 @@ export const handler = async (event: any) => {
     if (!authHeader.startsWith('Bearer ')) {
       return {
         statusCode: 401,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'unauthorized' })
       };
     }
@@ -38,6 +83,10 @@ export const handler = async (event: any) => {
     if (userError || !user) {
       return {
         statusCode: 401,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'unauthorized' })
       };
     }
@@ -68,6 +117,10 @@ export const handler = async (event: any) => {
       console.error('[notifications-list] Erreur chargement notifications:', notifError);
       return {
         statusCode: 500,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'notifications_error', message: notifError.message })
       };
     }
@@ -80,9 +133,9 @@ export const handler = async (event: any) => {
     return {
       statusCode: 200,
       headers: {
+        ...corsHeaders,
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+        'Access-Control-Allow-Headers': 'content-type, authorization'
       },
       body: JSON.stringify({
         ok: true,
@@ -95,6 +148,10 @@ export const handler = async (event: any) => {
     console.error('[notifications-list] Erreur globale:', error);
     return {
       statusCode: 500,
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({ error: 'internal_error', message: error.message })
     };
   }

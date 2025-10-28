@@ -2,6 +2,27 @@
 // Endpoint pour marquer une notification comme lue
 
 export const handler = async (event: any) => {
+  const requestOrigin = (event?.headers && (event.headers.origin || (event.headers as any).Origin)) || '';
+  const frontendOrigin = process.env.FRONTEND_ORIGIN || requestOrigin || '';
+  const buildCorsHeaders = () => (frontendOrigin ? {
+    'Access-Control-Allow-Origin': frontendOrigin,
+    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin'
+  } : {});
+
+  // CORS preflight
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 204,
+      headers: {
+        ...buildCorsHeaders(),
+        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+      },
+      body: ''
+    };
+  }
+
   const { createClient } = await import('@supabase/supabase-js');
 
   const SUPABASE_URL = process.env.VITE_SUPABASE_URL || '';
@@ -16,6 +37,10 @@ export const handler = async (event: any) => {
     if (event.httpMethod !== 'POST') {
       return {
         statusCode: 405,
+        headers: {
+          ...buildCorsHeaders(),
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'method_not_allowed' })
       };
     }
@@ -25,6 +50,10 @@ export const handler = async (event: any) => {
     if (!authHeader.startsWith('Bearer ')) {
       return {
         statusCode: 401,
+        headers: {
+          ...buildCorsHeaders(),
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'unauthorized' })
       };
     }
@@ -38,6 +67,10 @@ export const handler = async (event: any) => {
     if (userError || !user) {
       return {
         statusCode: 401,
+        headers: {
+          ...buildCorsHeaders(),
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'unauthorized' })
       };
     }
@@ -51,6 +84,10 @@ export const handler = async (event: any) => {
     if (!notification_id) {
       return {
         statusCode: 400,
+        headers: {
+          ...buildCorsHeaders(),
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'missing_notification_id' })
       };
     }
@@ -68,6 +105,10 @@ export const handler = async (event: any) => {
       console.error('[notifications-mark-read] Erreur mise à jour:', updateError);
       return {
         statusCode: 500,
+        headers: {
+          ...buildCorsHeaders(),
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ error: 'update_error', message: updateError.message })
       };
     }
@@ -77,8 +118,8 @@ export const handler = async (event: any) => {
     return {
       statusCode: 200,
       headers: {
+        ...buildCorsHeaders(),
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization'
       },
       body: JSON.stringify({ ok: true })
@@ -88,6 +129,10 @@ export const handler = async (event: any) => {
     console.error('[notifications-mark-read] Erreur globale:', error);
     return {
       statusCode: 500,
+      headers: {
+        ...buildCorsHeaders(),
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({ error: 'internal_error', message: error.message })
     };
   }

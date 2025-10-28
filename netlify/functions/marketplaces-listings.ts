@@ -84,8 +84,8 @@ export const handler = async (event: any) => {
       return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'missing_token' }) };
     }
 
-    const accessToken = authHeader.replace('Bearer ', '');
-    const { data: { user }, error: authError } = await supabase.auth.getUser(accessToken);
+    const supabaseAccessToken = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: authError } = await supabase.auth.getUser(supabaseAccessToken);
 
     if (authError || !user) {
       console.warn('⚠️ Invalid token or user not found:', authError?.message);
@@ -276,8 +276,8 @@ export const handler = async (event: any) => {
       });
     };
 
-    let accessToken = tokenRow.access_token;
-    let inv = await fetchInventoryItems(accessToken);
+    let ebayAccessToken = tokenRow.access_token;
+    let inv = await fetchInventoryItems(ebayAccessToken);
 
     if (!inv.ok && inv.status === 401) {
       console.warn('⚠️ Inventory 401 — attempting refresh');
@@ -372,8 +372,8 @@ export const handler = async (event: any) => {
         .update(updateData)
         .eq('marketplace_account_id', account_id);
 
-      accessToken = refreshed.access_token;
-      inv = await fetchInventoryItems(accessToken);
+      ebayAccessToken = refreshed.access_token;
+      inv = await fetchInventoryItems(ebayAccessToken);
     }
 
     if (!inv.ok) {
@@ -515,7 +515,7 @@ export const handler = async (event: any) => {
       const batch = skus.slice(i, i + CONCURRENCY);
       console.info(`🔄 Processing batch ${Math.floor(i / CONCURRENCY) + 1}, SKUs ${i + 1}-${Math.min(i + CONCURRENCY, skus.length)}`);
 
-      const settled = await Promise.allSettled(batch.map((sku: string) => fetchOffersBySku(accessToken, sku)));
+      const settled = await Promise.allSettled(batch.map((sku: string) => fetchOffersBySku(ebayAccessToken, sku)));
 
       for (let k = 0; k < settled.length; k++) {
         const r = settled[k];
