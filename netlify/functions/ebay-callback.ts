@@ -114,10 +114,13 @@ export const handler = async (event: any) => {
       };
     }
 
+    const tokenScopes = 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment';
+
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
       redirect_uri: redirectFull,
+      scope: tokenScopes,
     }).toString();
 
     const baseHost = environment === 'sandbox' ? 'https://api.sandbox.ebay.com' : 'https://api.ebay.com';
@@ -153,6 +156,7 @@ export const handler = async (event: any) => {
       return { statusCode: 502, headers: buildCorsHeaders(), body: JSON.stringify({ reason: 'r0_detected_no_refresh_token' }) };
     }
     const scopeStr = typeof scope === 'string' ? scope : Array.isArray(scope) ? scope.join(' ') : '';
+    console.debug('token_debug', { hasScopeField: Object.prototype.hasOwnProperty.call(data, 'scope'), scopeLen: (scopeStr || '').length });
     const hasRequired = /\bsell\.inventory\b|\bsell\.account\b|\bsell\.fulfillment\b/.test(scopeStr);
     let insufficientScopes = false;
     if (!hasRequired) {
