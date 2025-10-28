@@ -132,7 +132,8 @@ export const handler = async (event: any) => {
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
-      redirect_uri: redirectFull
+      redirect_uri: redirectFull,
+      scope: REQUIRED_SCOPES.join(' ')
     }).toString();
 
     console.log(`🌐 Requesting token from eBay PRODUCTION...`);
@@ -178,6 +179,19 @@ export const handler = async (event: any) => {
       hasAllScopes
     });
 
+    // Fallback contrôlé: si eBay n'inclut pas le champ scope, vérifier les privilèges SELL
+    let privilegeOk = false;
+    try {
+      const r = await fetch('https://api.ebay.com/sell/account/v1/privilege', {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${access_token}`, Accept: 'application/json' }
+      });
+      privilegeOk = r.status === 200;
+      console.info('ebay_privilege_status', { status: r.status });
+    } catch {
+      console.warn('ebay_privilege_status_error');
+    }
+
     // --- Chiffrement AES-GCM (WebCrypto) du refresh token ---
     const encryptData = async (data: string): Promise<{ encrypted: string; iv: string }> => {
       if (!secretKey) {
@@ -213,8 +227,8 @@ export const handler = async (event: any) => {
     }
     const supabase = createClient(supabaseUrl as string, supabaseKey as string);
 
-    // Re-consent strict si scopes insuffisants ou mauvais token_type
-    if (token_type !== 'User Access Token' || !hasAllScopes) {
+    // Re-consent si token_type invalide OU (scopes insuffisants ET pas de privilège SELL)
+    if (token_type !== 'User Access Token' || (!hasAllScopes && !privilegeOk)) {
       console.warn('ebay_callback_insufficient_scope', { token_type, scope: scopeStr });
 
       const cookieHeader = (event.headers as any)?.cookie || (event.headers as any)?.Cookie || '';
