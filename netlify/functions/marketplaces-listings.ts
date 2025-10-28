@@ -117,7 +117,27 @@ export const handler = async (event: any) => {
     }
 
     const qs = event.queryStringParameters || {};
-    const account_id = qs.account_id;
+
+    // Params + logs (provider/env/accountId)
+    const provider = (qs.provider || 'ebay') as 'ebay';
+    const environment = (qs.environment || 'production') as 'production' | 'sandbox';
+    const accountIdParam = (qs.accountId || qs.account_id || undefined) as string | undefined;
+    console.info('listings_params', { provider, environment, accountId: accountIdParam });
+
+    // Fetch token via shared helper (robuste)
+    const { getOAuthToken } = await import('./_shared/oauth');
+    let tok: any;
+    try {
+      tok = await getOAuthToken({ provider, environment, accountId: accountIdParam });
+    } catch (e: any) {
+      console.error('listings_token_fetch_error', e?.message || e);
+      if (e?.message === 'missing_account') return badRequest('missing_account_id');
+      if (e?.message === 'missing_token') return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing' }) };
+      return srvError('token_lookup_failed', e?.message || 'unknown');
+    }
+    console.info('listings_token_fetch', { found: !!tok, accountId_used: tok?.marketplace_account_id });
+
+    const account_id = (tok?.marketplace_account_id || accountIdParam || '') as string;
     const limit = Math.min(parseInt(qs.limit || '50', 10) || 50, 200);
     const page = Math.max(parseInt(qs.page || '1', 10) || 1, 1);
     let offset = parseInt(qs.offset || '0', 10) || 0;
@@ -144,17 +164,10 @@ export const handler = async (event: any) => {
     }
     console.info('✅ Account found:', account.id);
 
-    const { data: tokenRow, error: tokErr } = await supabaseService
-      .from('oauth_tokens')
-      .select('*')
-      .eq('marketplace_account_id', account_id)
-      .neq('access_token', 'pending')
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (tokErr || !tokenRow) {
-      console.error('❌ token_missing', tokErr);
+    // Utiliser le token récupéré via getOAuthToken
+    const tokenRow: any = tok;
+    if (!tokenRow) {
+      console.error('❌ token_missing_lookup');
       return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing' }) };
     }
     console.info('✅ Token found');
