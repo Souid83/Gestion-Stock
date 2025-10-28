@@ -104,7 +104,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
 
   try {
     const qs = (event as any).queryStringParameters || {};
-    const isTestGet = event.httpMethod === 'GET' && qs.test === '1';
+    const isTestGet = event.httpMethod === 'GET' && (qs.test === '1' || qs.reconsent === '1');
 
     if (!isTestGet && event.httpMethod !== 'POST') {
       return {
