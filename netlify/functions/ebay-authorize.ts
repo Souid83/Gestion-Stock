@@ -147,7 +147,6 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
 
       const authBaseUrl = EBAY_PRODUCTION_AUTH_URL;
       const scopes = [
-        'https://api.ebay.com/oauth/api_scope',
         'https://api.ebay.com/oauth/api_scope/sell.account',
         'https://api.ebay.com/oauth/api_scope/sell.inventory',
         'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
@@ -155,7 +154,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
 
       // Choix prompt: UNE seule valeur
       const q = (event as any).queryStringParameters || {};
-      const prompt = (q.reconsent === '1') ? 'consent' : 'login';
+      const prompt = 'consent';
 
       // Encodage: valeurs seulement (une fois)
       const redirect = encodeURIComponent(ruNameFinal);
@@ -281,24 +280,32 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
 
     // Choix prompt: UNE seule valeur
     const q = (event as any).queryStringParameters || {};
-    const prompt = (q.reconsent === '1') ? 'consent' : 'login';
+    const prompt = 'consent';
 
     // Scopes ÉLARGIS (comme ancien code): base + SELL (+ readonly/finances/etc.)
-    const scopesExpanded = [
-      'https://api.ebay.com/oauth/api_scope',
-      'https://api.ebay.com/oauth/api_scope/sell.marketing.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.marketing',
-      'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.inventory',
-      'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.account',
-      'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
-      'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
-      'https://api.ebay.com/oauth/api_scope/sell.finances',
-      'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
-      'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly'
-    ].join(' ');
+    const scopesExpanded = (
+      environment === 'production'
+        ? [
+            'https://api.ebay.com/oauth/api_scope/sell.account',
+            'https://api.ebay.com/oauth/api_scope/sell.inventory',
+            'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
+          ]
+        : [
+            'https://api.ebay.com/oauth/api_scope',
+            'https://api.ebay.com/oauth/api_scope/sell.marketing.readonly',
+            'https://api.ebay.com/oauth/api_scope/sell.marketing',
+            'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
+            'https://api.ebay.com/oauth/api_scope/sell.inventory',
+            'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
+            'https://api.ebay.com/oauth/api_scope/sell.account',
+            'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
+            'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+            'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
+            'https://api.ebay.com/oauth/api_scope/sell.finances',
+            'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
+            'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly'
+          ]
+    ).join(' ');
 
     // En PRODUCTION, forcer l'usage des identifiants d'environnement pour éviter "issued to another client"
     const ruNameProd = environment === 'production' ? (process.env.EBAY_RUNAME_PROD || ruNameFinal) : ruNameFinal;
