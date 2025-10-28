@@ -85,52 +85,30 @@ export const handler = async (event: any) => {
     }
     const redirectFull: string = ruName;
 
-    // DevPortal/test tolerance: if state is missing/invalid (e.g., Developer Portal "Test Sign-in") or ?test=1, re-amorce vers authorize (prompt=consent)
+    // DevPortal/test tolerance: if state missing/invalid (e.g., Developer Portal "Test Sign-in") or ?test=1,
+    // redirect ONCE to our authorize function with prompt=consent, using an anti-loop cookie.
     const qs = (event as any).queryStringParameters || {};
     const referer = (event.headers as any)?.referer || (event.headers as any)?.Referer || '';
     const isDevPortal = !state || state === '' || (typeof referer === 'string' && referer.includes('developer.ebay.com')) || qs.test === '1';
     if (isDevPortal) {
-      console.info('callback_state_missing_devportal', { hasState: !!state, referer: referer || '' });
-      const genNonce = () => {
-        const buf = new Uint8Array(32);
-        (globalThis.crypto || (crypto as any)).getRandomValues(buf);
-        return Buffer.from(buf).toString('base64url');
-      };
-      const newState = genNonce();
-      try {
-        const supabaseTmp = createClient(supabaseUrl as string, supabaseKey as string);
-        await supabaseTmp
-          .from('oauth_tokens')
-          .insert({
-            marketplace_account_id: null,
-            access_token: 'pending',
-            state_nonce: newState,
-            expires_at: new Date(Date.now() + 600000).toISOString(),
-            updated_at: new Date().toISOString()
-          } as any);
-      } catch {}
+      console.warn('callback_state_missing_devportal');
+      const cookieHeader = (event.headers as any)?.cookie || (event.headers as any)?.Cookie || '';
+      const cookieAttrs = `Path=/; HttpOnly; SameSite=Lax${isHttps ? '; Secure' : ''}`;
+      const hasOnce = typeof cookieHeader === 'string' && cookieHeader.includes('gf_ebay_reauth_once=1');
 
-      const authBaseUrl = 'https://auth.ebay.com/oauth2/authorize';
-      const scopes = [
-        'https://api.ebay.com/oauth/api_scope/sell.account',
-        'https://api.ebay.com/oauth/api_scope/sell.inventory',
-        'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
-      ].join(' ');
-      const authorizeUrl =
-        `${authBaseUrl}?client_id=${encodeURIComponent(String(clientId || ''))}` +
-        `&response_type=code` +
-        `&redirect_uri=${encodeURIComponent(redirectFull)}` +
-        `&scope=${encodeURIComponent(scopes)}` +
-        `&state=${encodeURIComponent(newState)}` +
-        `&prompt=consent&err=${encodeURIComponent('state')}`;
+      if (hasOnce) {
+        const html = `<html><body><p>Re-consent requis.</p><a href="/.netlify/functions/ebay-authorize?reconsent=1">Continuer</a></body></html>`;
+        return { statusCode: 200, headers: { 'Content-Type': 'text/html', ...buildCorsHeaders() }, body: html };
+      }
 
-      const reauthCookie = buildCookie('gf_ebay', 'reauth', 300);
+      const setOnce = `gf_ebay_reauth_once=1; ${cookieAttrs}`;
+      const setReauth = `gf_ebay=reauth; ${cookieAttrs}`;
       return {
         statusCode: 302,
         headers: {
           ...buildCorsHeaders(),
-          'Location': authorizeUrl,
-          'Set-Cookie': reauthCookie
+          'Location': `/.netlify/functions/ebay-authorize?reconsent=1`,
+          'Set-Cookie': `${setOnce}, ${setReauth}`
         },
         body: ''
       };
@@ -222,48 +200,23 @@ export const handler = async (event: any) => {
     if (token_type !== 'User Access Token' || !hasRequired || !scopeStr) {
       console.warn('ebay_callback_insufficient_scope', { token_type, scope: scopeStr });
 
-      // Generate a fresh state nonce and insert a pending row for the new round-trip
-      const genNonce = () => {
-        const buf = new Uint8Array(32);
-        (globalThis.crypto || (crypto as any)).getRandomValues(buf);
-        return Buffer.from(buf).toString('base64url');
-      };
-      const newState = genNonce();
-      try {
-        await supabase
-          .from('oauth_tokens')
-          .insert({
-            marketplace_account_id: null,
-            access_token: 'pending',
-            state_nonce: newState,
-            expires_at: new Date(Date.now() + 600000).toISOString(),
-            updated_at: new Date().toISOString()
-          } as any);
-      } catch {}
+      const cookieHeader = (event.headers as any)?.cookie || (event.headers as any)?.Cookie || '';
+      const cookieAttrs = `Path=/; HttpOnly; SameSite=Lax${isHttps ? '; Secure' : ''}`;
+      const hasOnce = typeof cookieHeader === 'string' && cookieHeader.includes('gf_ebay_reauth_once=1');
 
-      // Build production authorize URL with prompt=consent and error hint
-      const authBaseUrl = 'https://auth.ebay.com/oauth2/authorize';
-      const scopes = [
-        'https://api.ebay.com/oauth/api_scope/sell.account',
-        'https://api.ebay.com/oauth/api_scope/sell.inventory',
-        'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
-      ].join(' ');
-      const err = token_type !== 'User Access Token' ? 'token_type' : 'insufficient_scope';
-      const authorizeUrl =
-        `${authBaseUrl}?client_id=${encodeURIComponent(String(clientId || ''))}` +
-        `&response_type=code` +
-        `&redirect_uri=${encodeURIComponent(redirectFull)}` +
-        `&scope=${encodeURIComponent(scopes)}` +
-        `&state=${encodeURIComponent(newState)}` +
-        `&prompt=consent&err=${encodeURIComponent(err)}`;
+      if (hasOnce) {
+        const html = `<html><body><p>Re-consent requis.</p><a href="/.netlify/functions/ebay-authorize?reconsent=1">Continuer</a></body></html>`;
+        return { statusCode: 200, headers: { 'Content-Type': 'text/html', ...buildCorsHeaders() }, body: html };
+      }
 
-      const reauthCookie = buildCookie('gf_ebay', 'reauth', 300);
+      const setOnce = `gf_ebay_reauth_once=1; ${cookieAttrs}`;
+      const setReauth = `gf_ebay=reauth; ${cookieAttrs}`;
       return {
         statusCode: 302,
         headers: {
           ...buildCorsHeaders(),
-          'Location': authorizeUrl,
-          'Set-Cookie': reauthCookie
+          'Location': '/.netlify/functions/ebay-authorize?reconsent=1',
+          'Set-Cookie': `${setOnce}, ${setReauth}`
         },
         body: ''
       };
@@ -280,46 +233,24 @@ export const handler = async (event: any) => {
       // ignore
     }
     if (!stateNonce) {
-      // No state → re-amorce authorize with prompt=consent (do not store tokens)
-      const genNonce = () => {
-        const buf = new Uint8Array(32);
-        (globalThis.crypto || (crypto as any)).getRandomValues(buf);
-        return Buffer.from(buf).toString('base64url');
-      };
-      const newState = genNonce();
-      try {
-        await supabase
-          .from('oauth_tokens')
-          .insert({
-            marketplace_account_id: null,
-            access_token: 'pending',
-            state_nonce: newState,
-            expires_at: new Date(Date.now() + 600000).toISOString(),
-            updated_at: new Date().toISOString()
-          } as any);
-      } catch {}
+      // No state → single reconsent via our authorize function
+      const cookieHeader = (event.headers as any)?.cookie || (event.headers as any)?.Cookie || '';
+      const cookieAttrs = `Path=/; HttpOnly; SameSite=Lax${isHttps ? '; Secure' : ''}`;
+      const hasOnce = typeof cookieHeader === 'string' && cookieHeader.includes('gf_ebay_reauth_once=1');
 
-      const authBaseUrl = 'https://auth.ebay.com/oauth2/authorize';
-      const scopes = [
-        'https://api.ebay.com/oauth/api_scope/sell.account',
-        'https://api.ebay.com/oauth/api_scope/sell.inventory',
-        'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
-      ].join(' ');
-      const authorizeUrl =
-        `${authBaseUrl}?client_id=${encodeURIComponent(String(clientId || ''))}` +
-        `&response_type=code` +
-        `&redirect_uri=${encodeURIComponent(redirectFull)}` +
-        `&scope=${encodeURIComponent(scopes)}` +
-        `&state=${encodeURIComponent(newState)}` +
-        `&prompt=consent&err=${encodeURIComponent('state')}`;
+      if (hasOnce) {
+        const html = `<html><body><p>Re-consent requis.</p><a href="/.netlify/functions/ebay-authorize?reconsent=1">Continuer</a></body></html>`;
+        return { statusCode: 200, headers: { 'Content-Type': 'text/html', ...buildCorsHeaders() }, body: html };
+      }
 
-      const reauthCookie = buildCookie('gf_ebay', 'reauth', 300);
+      const setOnce = `gf_ebay_reauth_once=1; ${cookieAttrs}`;
+      const setReauth = `gf_ebay=reauth; ${cookieAttrs}`;
       return {
         statusCode: 302,
         headers: {
           ...buildCorsHeaders(),
-          'Location': authorizeUrl,
-          'Set-Cookie': reauthCookie
+          'Location': '/.netlify/functions/ebay-authorize?reconsent=1',
+          'Set-Cookie': `${setOnce}, ${setReauth}`
         },
         body: ''
       };
@@ -335,46 +266,23 @@ export const handler = async (event: any) => {
       // cleanup any stale rows with this nonce
       try { await supabase.from('oauth_tokens').delete().eq('state_nonce', stateNonce as any); } catch {}
 
-      // State not recognized → re-amorce authorize with prompt=consent
-      const genNonce = () => {
-        const buf = new Uint8Array(32);
-        (globalThis.crypto || (crypto as any)).getRandomValues(buf);
-        return Buffer.from(buf).toString('base64url');
-      };
-      const newState = genNonce();
-      try {
-        await supabase
-          .from('oauth_tokens')
-          .insert({
-            marketplace_account_id: null,
-            access_token: 'pending',
-            state_nonce: newState,
-            expires_at: new Date(Date.now() + 600000).toISOString(),
-            updated_at: new Date().toISOString()
-          } as any);
-      } catch {}
+      const cookieHeader = (event.headers as any)?.cookie || (event.headers as any)?.Cookie || '';
+      const cookieAttrs = `Path=/; HttpOnly; SameSite=Lax${isHttps ? '; Secure' : ''}`;
+      const hasOnce = typeof cookieHeader === 'string' && cookieHeader.includes('gf_ebay_reauth_once=1');
 
-      const authBaseUrl = 'https://auth.ebay.com/oauth2/authorize';
-      const scopes = [
-        'https://api.ebay.com/oauth/api_scope/sell.account',
-        'https://api.ebay.com/oauth/api_scope/sell.inventory',
-        'https://api.ebay.com/oauth/api_scope/sell.fulfillment'
-      ].join(' ');
-      const authorizeUrl =
-        `${authBaseUrl}?client_id=${encodeURIComponent(String(clientId || ''))}` +
-        `&response_type=code` +
-        `&redirect_uri=${encodeURIComponent(redirectFull)}` +
-        `&scope=${encodeURIComponent(scopes)}` +
-        `&state=${encodeURIComponent(newState)}` +
-        `&prompt=consent&err=${encodeURIComponent('state')}`;
+      if (hasOnce) {
+        const html = `<html><body><p>Re-consent requis.</p><a href="/.netlify/functions/ebay-authorize?reconsent=1">Continuer</a></body></html>`;
+        return { statusCode: 200, headers: { 'Content-Type': 'text/html', ...buildCorsHeaders() }, body: html };
+      }
 
-      const reauthCookie = buildCookie('gf_ebay', 'reauth', 300);
+      const setOnce = `gf_ebay_reauth_once=1; ${cookieAttrs}`;
+      const setReauth = `gf_ebay=reauth; ${cookieAttrs}`;
       return {
         statusCode: 302,
         headers: {
           ...buildCorsHeaders(),
-          'Location': authorizeUrl,
-          'Set-Cookie': reauthCookie
+          'Location': '/.netlify/functions/ebay-authorize?reconsent=1',
+          'Set-Cookie': `${setOnce}, ${setReauth}`
         },
         body: ''
       };
@@ -486,14 +394,15 @@ export const handler = async (event: any) => {
     {
       const redirectLocation = `/pricing?provider=ebay${(typeof insufficientScopes !== 'undefined' && insufficientScopes) ? '&connected=0&reason=insufficient_scope' : '&connected=1'}`;
       // Set a short-lived host-only cookie to reflect connection status (no Domain, Path=/, HttpOnly, SameSite=Lax; Secure if HTTPS)
-      const cookieVal = (typeof insufficientScopes !== 'undefined' && insufficientScopes) ? 'reauth' : 'connected';
-      const setCookie = buildCookie('gf_ebay', cookieVal, 300);
+      const cookieAttrs = `Path=/; HttpOnly; SameSite=Lax${isHttps ? '; Secure' : ''}`;
+      const okCookie = `gf_ebay=connected; ${cookieAttrs}`;
+      const clearOnce = `gf_ebay_reauth_once=; ${cookieAttrs}; Max-Age=0`;
       return {
         statusCode: 302,
         headers: {
           ...buildCorsHeaders(),
           'Location': redirectLocation,
-          'Set-Cookie': setCookie
+          'Set-Cookie': `${okCookie}, ${clearOnce}`
         },
         body: ''
       };
