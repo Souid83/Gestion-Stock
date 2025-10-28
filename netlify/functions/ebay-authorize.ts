@@ -283,12 +283,21 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     const q = (event as any).queryStringParameters || {};
     const prompt = (q.reconsent === '1') ? 'consent' : 'login';
 
-    // Scopes: base + SELL (un espace entre chaque)
-    const scopes = [
+    // Scopes ÉLARGIS (comme ancien code): base + SELL (+ readonly/finances/etc.)
+    const scopesExpanded = [
       'https://api.ebay.com/oauth/api_scope',
-      'https://api.ebay.com/oauth/api_scope/sell.account',
+      'https://api.ebay.com/oauth/api_scope/sell.marketing.readonly',
+      'https://api.ebay.com/oauth/api_scope/sell.marketing',
+      'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
       'https://api.ebay.com/oauth/api_scope/sell.inventory',
+      'https://api.ebay.com/oauth/api_scope/sell.account.readonly',
+      'https://api.ebay.com/oauth/api_scope/sell.account',
+      'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
       'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
+      'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
+      'https://api.ebay.com/oauth/api_scope/sell.finances',
+      'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
+      'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly'
     ].join(' ');
 
     const ruNameProd = ruNameFinal;
@@ -296,35 +305,40 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
 
     // Encodage: valeurs seulement (une fois)
     const redirect = encodeURIComponent(ruNameProd);
-    const scopeParam = encodeURIComponent(scopes);
-    const stateParam = encodeURIComponent(stateNonce); // garder le state généré plus haut
+    const scopeParam = encodeURIComponent(scopesExpanded);
+    const stateParam = encodeURIComponent(stateNonce);
 
     // Logs de contrôle
     console.debug('authorize_query', q);
     console.debug('authorize_effective_prompt', { chosen: prompt });
 
-    // Construction finale (AUCUN autre &prompt ajouté ailleurs)
-    const authUrl =
-      'https://auth.ebay.com/oauth2/authorize'
-      + `?client_id=${clientId}`
-      + '&response_type=code'
+    // Construction finale (une seule insertion de &prompt)
+    let authorizeUrl =
+      `${authBaseUrl}`
+      + `?client_id=${encodeURIComponent(clientId)}`
+      + `&response_type=code`
       + `&redirect_uri=${redirect}`
       + `&scope=${scopeParam}`
       + `&state=${stateParam}`
       + `&prompt=${prompt}`;
 
-    // Garde-fou: si jamais une concat a laissé 2 mots
-    if (/\blogin\s+consent\b|\bconsent\s+login\b/.test(authUrl)) {
-      console.error('[authorize] prompt invalid détecté', { authUrlSample: authUrl.slice(0, 120) + '...' });
+    // Garde-fou: interdire “login consent” ou “consent login”
+    if (/\blogin\s+consent\b|\bconsent\s+login\b/.test(authorizeUrl)) {
+      console.error('[authorize] prompt invalid détecté', { authUrlSample: authorizeUrl.slice(0, 120) + '...' });
       throw new Error('authorize_prompt_invalid');
     }
 
     console.info('eBay authorize', {
       environment: 'production',
-      url: authUrl.replace(/(state=)[^&]+/, '$1<hidden>'),
+      url: authorizeUrl.replace(/(state=)[^&]+/, '$1<hidden>')
     });
 
-    return { statusCode: 302, headers: { Location: authUrl }, body: '' };
+    // Retourner 200 JSON (pattern ancien): le front fera la redirection
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ authorizeUrl })
+    };
 
   } catch (error: any) {
     return {
