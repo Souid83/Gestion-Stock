@@ -157,6 +157,21 @@ export const handler = async (event: any) => {
     }
     const scopeStr = typeof scope === 'string' ? scope : Array.isArray(scope) ? scope.join(' ') : '';
     console.debug('token_debug', { hasScopeField: Object.prototype.hasOwnProperty.call(data, 'scope'), scopeLen: (scopeStr || '').length });
+
+    // Diagnostic temporaire: vérifier les privilèges SELL (status only, aucun secret loggé)
+    try {
+      const privilegeResp = await fetch(`${baseHost}/sell/account/v1/privilege`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${access_token}`,
+          Accept: 'application/json'
+        }
+      });
+      console.info('ebay_privilege_status', { status: privilegeResp.status });
+    } catch {
+      console.warn('ebay_privilege_status_error');
+    }
+
     const hasRequired = /\bsell\.inventory\b|\bsell\.account\b|\bsell\.fulfillment\b/.test(scopeStr);
     let insufficientScopes = false;
     if (!hasRequired) {
