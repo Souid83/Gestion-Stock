@@ -145,6 +145,14 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
           updated_at: new Date().toISOString()
         });
 
+      // Encoder un state complet (base64url) attendu par la callback
+      const statePayload = {
+        n: stateNonce,
+        environment,
+        account_id: null
+      };
+      const stateEncoded = Buffer.from(JSON.stringify(statePayload)).toString('base64url');
+
       const authBaseUrl = EBAY_PRODUCTION_AUTH_URL;
       const scopes = [
         'https://api.ebay.com/oauth/api_scope/sell.account',
@@ -159,7 +167,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
       // Encodage: valeurs seulement (une fois)
       const redirect = encodeURIComponent(ruNameFinal);
       const scopeParam = encodeURIComponent(scopes.join(' '));
-      const stateParam = encodeURIComponent(stateNonce);
+      const stateParam = encodeURIComponent(stateEncoded);
 
       // Logs de contrôle
       console.debug('authorize_query', q);
@@ -314,7 +322,7 @@ export const handler = async (event: NetlifyEvent, context: NetlifyContext): Pro
     // Encodage: valeurs seulement (une fois)
     const redirect = encodeURIComponent(ruNameProd);
     const scopeParam = encodeURIComponent(scopesExpanded);
-    const stateParam = encodeURIComponent(stateNonce);
+    const stateParam = encodeURIComponent(stateEncoded);
 
     // Logs de contrôle
     console.debug('authorize_query', q);
