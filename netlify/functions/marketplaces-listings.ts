@@ -1,5 +1,5 @@
 process.env.NODE_NO_WARNINGS = process.env.NODE_NO_WARNINGS || '1';
-import { getOAuthToken } from './_shared/oauth';
+import { getOAuthToken } from './oauth';
 
 const MAX_SKUS_PER_RUN = parseInt(process.env.EBAY_MAX_SKUS_PER_RUN || '300', 10);
 const CONCURRENCY = Math.min(parseInt(process.env.EBAY_CONCURRENCY || '3', 10), 10);
