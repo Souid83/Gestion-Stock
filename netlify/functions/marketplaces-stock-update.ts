@@ -1,6 +1,7 @@
 process.env.NODE_NO_WARNINGS = process.env.NODE_NO_WARNINGS || '1';
 
 import { createClient } from '@supabase/supabase-js';
+import { getOAuthToken } from './oauth';
 
 type NetlifyResponse = { statusCode: number; headers?: Record<string, string>; body: string };
 
@@ -80,44 +81,63 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
       return { statusCode: 405, headers: JSON_HEADERS, body: JSON.stringify({ error: 'method_not_allowed' }) };
     }
 
-    // RBAC: Authenticate user and check role
+    // RBAC: Authenticate user and check role (bypass autorisé via RBAC_BYPASS/RBAC_DISABLED)
+    const RBAC_BYPASS = (process.env.RBAC_BYPASS === 'true') || (process.env.RBAC_DISABLED === 'true');
     console.log('🔐 [StockUpdate] Authenticating user...');
-    const authHeader = event.headers.authorization || event.headers.Authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.warn('⚠️ [StockUpdate] Missing or invalid authorization header');
-      return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'missing_token' }) };
-    }
+    const authHeader = event.headers?.authorization || event.headers?.Authorization;
+    let userRole: string = 'MAGASIN';
+    let userId: string | null = null;
 
-    const supabaseAccessToken = authHeader.replace('Bearer ', '');
-    const { data: { user }, error: authError } = await supabase.auth.getUser(supabaseAccessToken);
+    const hasBearer = !!authHeader && String(authHeader).startsWith('Bearer ');
+    if (!hasBearer) {
+      if (RBAC_BYPASS) {
+        console.warn('RBAC bypass activé pour marketplaces-stock-update');
+        userRole = 'ADMIN_FULL';
+      } else {
+        return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'missing_token' }) };
+      }
+    } else {
+      const supabaseAccessToken = String(authHeader).replace('Bearer ', '');
+      const { data: { user }, error: authError } = await supabase.auth.getUser(supabaseAccessToken);
+      if (authError || !user) {
+        if (RBAC_BYPASS) {
+          console.warn('RBAC bypass activé pour marketplaces-stock-update (token invalide)');
+          userRole = 'ADMIN_FULL';
+        } else {
+          return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'invalid_token' }) };
+        }
+      } else {
+        console.log('✅ [StockUpdate] User authenticated:', user.id);
+        userId = user.id;
 
-    if (authError || !user) {
-      console.warn('⚠️ [StockUpdate] Invalid token or user not found:', authError?.message);
-      return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'invalid_token' }) };
-    }
+        const { data: profile, error: profileError } = await supabaseService
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .maybeSingle();
 
-    console.log('✅ [StockUpdate] User authenticated:', user.id);
-
-    // Load user role
-    const { data: profile, error: profileError } = await supabaseService
-      .from('profiles')
-      .select('role')
-      .eq('id', user.id)
-      .maybeSingle();
-
-    if (profileError) {
-      console.error('❌ [StockUpdate] Error loading user profile:', profileError);
-      return { statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error: 'profile_load_failed' }) };
-    }
-
-    const userRole = profile?.role || 'MAGASIN';
-    console.log('👤 [StockUpdate] User role:', userRole);
-
-    // Only ADMIN_FULL and ADMIN can push price updates
-    const allowedRoles = ['ADMIN_FULL', 'ADMIN'];
-    if (!allowedRoles.includes(userRole)) {
-      console.warn('⚠️ [StockUpdate] User role not authorized for price/stock updates:', userRole);
-      return { statusCode: 403, headers: JSON_HEADERS, body: JSON.stringify({ error: 'insufficient_role' }) };
+        if (profileError) {
+          if (!RBAC_BYPASS) {
+            console.error('❌ [StockUpdate] Error loading user profile:', profileError);
+            return { statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error: 'profile_load_failed' }) };
+          } else {
+            userRole = 'ADMIN_FULL';
+          }
+        } else {
+          userRole = profile?.role || 'MAGASIN';
+          console.log('👤 [StockUpdate] User role:', userRole);
+          const allowedRoles = ['ADMIN_FULL', 'ADMIN'];
+          if (!allowedRoles.includes(userRole)) {
+            if (!RBAC_BYPASS) {
+              console.warn('⚠️ [StockUpdate] User role not authorized for price/stock updates:', userRole);
+              return { statusCode: 403, headers: JSON_HEADERS, body: JSON.stringify({ error: 'insufficient_role' }) };
+            } else {
+              console.warn('RBAC bypass: overriding role check');
+              userRole = 'ADMIN_FULL';
+            }
+          }
+        }
+      }
     }
 
     console.log('✅ [StockUpdate] Permission granted for price/stock update');
@@ -141,15 +161,18 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
       .maybeSingle();
     if (accErr || !account) return { statusCode: 404, headers: JSON_HEADERS, body: JSON.stringify({ error: 'account_not_found' }) };
 
-    const { data: tokenRow, error: tokErr } = await supabaseService
-      .from('oauth_tokens')
-      .select('*')
-      .eq('marketplace_account_id', account_id)
-      .neq('access_token', 'pending')
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (tokErr || !tokenRow) return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing' }) };
+    console.info('[StockUpdate] stock_update_params', { account_id, items_len: items.length });
+    let tok: any;
+    try {
+      tok = await getOAuthToken({ accountId: account_id, provider: 'ebay', environment: (account.environment === 'sandbox' ? 'sandbox' : 'production') });
+    } catch (e: any) {
+      console.error('[StockUpdate] token_lookup_failed', e?.message || e);
+      return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing' }) };
+    }
+    console.info('[StockUpdate] stock_update_token_fetch', { found: !!tok, accountId_used: tok?.marketplace_account_id });
+
+    const tokenRow: any = tok;
+    if (!tokenRow) return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing' }) };
 
     const baseHost = account.environment === 'sandbox' ? 'https://api.sandbox.ebay.com' : 'https://api.ebay.com';
     const updateUrl = new URL('/sell/inventory/v1/bulk_update_price_quantity', baseHost).toString();
@@ -237,7 +260,7 @@ export const handler = async (event: any): Promise<NetlifyResponse> => {
           updated_at: new Date().toISOString(),
           expires_at: refreshed.expires_in ? new Date(Date.now() + refreshed.expires_in * 1000).toISOString() : tokenRow.expires_at || null
         })
-        .eq('marketplace_account_id', account_id);
+        .eq('id', tokenRow.id as any);
 
       // Mark account as healthy (no reauth needed) after a successful refresh
       await supabaseService
