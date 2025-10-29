@@ -44,6 +44,7 @@ export function ConsignmentsSection() {
   const [error, setError] = useState<string | null>(null);
 
   const canViewVAT = canViewConsignmentsVAT(userRole);
+  const canSeeSection = userRole === ROLES.ADMIN_FULL || userRole === ROLES.ADMIN;
 
   const euro = useMemo(
     () =>
@@ -93,7 +94,29 @@ export function ConsignmentsSection() {
           throw new Error('Session manquante');
         }
 
-        // 1) Synthèse (expose la liste des stocks)
+        // 0) Liste des stocks du groupe "SOUS TRAITANT" (pour inclure même vides)
+        let groupStocks: { stock_id: string; stock_name: string }[] = [];
+        try {
+          const { data: sg, error: sgErr } = await supabase
+            .from('stock_groups')
+            .select('stock_id, stock_name, name')
+            .eq('name', 'SOUS TRAITANT');
+          if (!sgErr && Array.isArray(sg)) {
+            const seen = new Set<string>();
+            groupStocks = (sg as any[]).map((r: any) => ({
+              stock_id: String(r?.stock_id || ''),
+              stock_name: String(r?.stock_name || '')
+            })).filter(s => s.stock_id).filter(s => {
+              if (seen.has(s.stock_id)) return false;
+              seen.add(s.stock_id);
+              return true;
+            });
+          }
+        } catch (_) {
+          // silencieux: absence de table/colonnes → fallback sur summary
+        }
+
+        // 1) Synthèse (expose les stocks avec activité)
         const baseUrl = '/.netlify/functions/consignments-list';
         const res = await fetch(baseUrl, {
           headers: {
@@ -110,12 +133,33 @@ export function ConsignmentsSection() {
         const rows: SummaryRow[] = Array.isArray(data?.summary) ? data.summary : [];
         if (cancelled) return;
 
-        setSummary(rows);
+        // 1.b) Choisir la source d’affichage: priorité aux stocks du groupe
+        const stocksToShow = (groupStocks && groupStocks.length > 0)
+          ? groupStocks
+          : (rows || []).map((r) => ({ stock_id: r.stock_id, stock_name: r.stock_name }));
+
+        // Construire le summary à afficher (fusionne info client si dispo)
+        const summaryRows: SummaryRow[] = stocksToShow.map((s) => {
+          const m = (rows || []).find(r => r.stock_id === s.stock_id);
+          return {
+            stock_id: s.stock_id,
+            stock_name: s.stock_name || m?.stock_name || '',
+            customer_id: m?.customer_id ?? null,
+            customer_name: m?.customer_name ?? null,
+            total_en_depot: m?.total_en_depot ?? null,
+            total_facture_non_payee: m?.total_facture_non_payee ?? null,
+            total_ht: m?.total_ht ?? null,
+            total_ttc: m?.total_ttc ?? null,
+            total_tva_normal: m?.total_tva_normal ?? null,
+            total_tva_marge: m?.total_tva_marge ?? null
+          };
+        });
+        setSummary(summaryRows);
 
         // 2) Détails par stock (pour agrégations locales)
         const byStock: DetailsByStock = {};
-        // Charger séquentiellement (minimal et sûr), on peut optimiser plus tard si besoin
-        for (const s of rows) {
+        // Charger séquentiellement
+        for (const s of stocksToShow) {
           if (!s?.stock_id) continue;
           const u = `${baseUrl}?stock_id=${encodeURIComponent(s.stock_id)}&detail=1`;
           const dRes = await fetch(u, {
@@ -199,6 +243,13 @@ export function ConsignmentsSection() {
   const formatMoney = (v: number) => euro.format(v || 0);
 
   // Rendu
+  if (!canSeeSection) {
+    return (
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 text-center text-gray-600">
+        Accès limité aux rôles ADMIN/ADMIN_FULL
+      </div>
+    );
+  }
   return (
     <div className="space-y-6">
       {/* Bandeau KPI */}
