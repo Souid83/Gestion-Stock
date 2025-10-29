@@ -1,4 +1,5 @@
 process.env.NODE_NO_WARNINGS = process.env.NODE_NO_WARNINGS || '1';
+import { getOAuthToken } from './_shared/oauth';
 
 const MAX_SKUS_PER_RUN = parseInt(process.env.EBAY_MAX_SKUS_PER_RUN || '300', 10);
 const CONCURRENCY = Math.min(parseInt(process.env.EBAY_CONCURRENCY || '3', 10), 10);
@@ -146,7 +147,6 @@ export const handler = async (event: any) => {
     console.info('listings_params', { provider, environment, accountId: accountIdParam });
 
     // Fetch token via shared helper (robuste)
-    const { getOAuthToken } = await import('./_shared/oauth');
     let tok: any;
     try {
       tok = await getOAuthToken({ provider, environment, accountId: accountIdParam });
