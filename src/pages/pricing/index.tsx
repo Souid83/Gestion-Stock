@@ -274,6 +274,7 @@ export default function MarketplacePricing() {
         const offset = String((currentPage - 1) * itemsPerPage);
         const params = new URLSearchParams({
           provider: selectedProvider,
+          accountId: selectedAccountId,
           account_id: selectedAccountId,
           q: filters.searchQuery,
           only_unmapped: filters.unmappedFirst ? 'true' : 'false',
@@ -282,7 +283,14 @@ export default function MarketplacePricing() {
           limit: itemsPerPage.toString(),
           offset
         });
-        const response = await fetch(`/.netlify/functions/marketplaces-listings?${params}`);
+        const { data: sessionData } = await supabase.auth.getSession();
+        const jwt = sessionData?.session?.access_token;
+        const headers: HeadersInit | undefined = jwt ? { Authorization: `Bearer ${jwt}` } : undefined;
+        const response = await fetch(`/.netlify/functions/marketplaces-listings?${params}`, {
+          method: 'GET',
+          headers,
+          credentials: 'include',
+        });
         console.log(`📥 Response status: ${response.status}`);
 
         if (!response.ok) {
@@ -729,10 +737,15 @@ export default function MarketplacePricing() {
       setIsLoadingAll(true);
       setToast({ message: 'Chargement de toutes les pages…', type: 'success' });
 
+      const { data: sessionData } = await supabase.auth.getSession();
+      const jwt = sessionData?.session?.access_token;
+      const authHeaders: HeadersInit | undefined = jwt ? { Authorization: `Bearer ${jwt}` } : undefined;
+
       const limit = itemsPerPage;
       // Première page pour connaître total
       const params1 = new URLSearchParams({
         provider: selectedProvider,
+        accountId: selectedAccountId,
         account_id: selectedAccountId,
         q: filters.searchQuery,
         // Toujours charger tout, pas uniquement les unmapped
@@ -742,7 +755,11 @@ export default function MarketplacePricing() {
         limit: String(limit),
         offset: '0'
       });
-      const resp1 = await fetch(`/.netlify/functions/marketplaces-listings?${params1}`);
+      const resp1 = await fetch(`/.netlify/functions/marketplaces-listings?${params1}`, {
+        method: 'GET',
+        headers: authHeaders,
+        credentials: 'include',
+      });
       if (!resp1.ok) {
         const t = await resp1.text();
         throw new Error(`HTTP ${resp1.status} ${t.substring(0, 120)}`);
@@ -780,6 +797,7 @@ export default function MarketplacePricing() {
         const offset = String((p - 1) * limit);
         const params = new URLSearchParams({
           provider: selectedProvider,
+          accountId: selectedAccountId,
           account_id: selectedAccountId,
           q: filters.searchQuery,
           only_unmapped: 'false',
@@ -788,7 +806,11 @@ export default function MarketplacePricing() {
           limit: String(limit),
           offset
         });
-        const resp = await fetch(`/.netlify/functions/marketplaces-listings?${params}`);
+        const resp = await fetch(`/.netlify/functions/marketplaces-listings?${params}`, {
+          method: 'GET',
+          headers: authHeaders,
+          credentials: 'include',
+        });
         if (!resp.ok) {
           const t = await resp.text();
           console.warn(`Page ${p} failed: HTTP ${resp.status} ${t.substring(0, 120)}`);
