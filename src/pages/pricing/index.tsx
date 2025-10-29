@@ -677,9 +677,13 @@ export default function MarketplacePricing() {
     if (!selectedAccountId || listing.qty_app == null || !listing.remote_sku) return;
     setActionLoading({ ...actionLoading, [listing.remote_id]: true });
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: HeadersInit = session?.access_token
+        ? { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` }
+        : { 'Content-Type': 'application/json' };
       const resp = await fetch('/.netlify/functions/marketplaces-stock-update', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           account_id: selectedAccountId,
           items: [{ sku: listing.remote_sku, quantity: listing.qty_app }]
@@ -700,9 +704,13 @@ export default function MarketplacePricing() {
 
   const confirmBulkQtySync = async () => {
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: HeadersInit = session?.access_token
+        ? { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` }
+        : { 'Content-Type': 'application/json' };
       const resp = await fetch('/.netlify/functions/marketplaces-stock-update', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           account_id: selectedAccountId,
           items: itemsToSync
@@ -910,11 +918,15 @@ export default function MarketplacePricing() {
     try {
       setIsBulkSyncing(true);
       setToast({ message: `Sync quantités… (${items.length})`, type: 'success' });
+      const { data: { session } } = await supabase.auth.getSession();
+      const stockHeaders: HeadersInit = session?.access_token
+        ? { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` }
+        : { 'Content-Type': 'application/json' };
       const batches = chunk(items, 100);
       for (let i = 0; i < batches.length; i++) {
         const resp = await fetch('/.netlify/functions/marketplaces-stock-update', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: stockHeaders,
           body: JSON.stringify({ account_id: selectedAccountId, items: batches[i] })
         });
         if (!resp.ok) {
