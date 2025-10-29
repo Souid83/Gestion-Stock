@@ -25,6 +25,7 @@ type DetailRow = {
   montant_ht?: number | null;
   tva_normal?: number | null;
   tva_marge?: number | null;
+  qty_en_depot?: number | null;
   // Champs optionnels pour l'affichage mini-liste
   imei?: string | null;
   pam?: string | null;
@@ -184,25 +185,35 @@ export function ConsignmentsSection() {
 
         // 2) Détails par stock (pour agrégations locales)
         const byStock: DetailsByStock = {};
-        // Charger séquentiellement
+        // Charger séquentiellement avec fallback direct Supabase si l'API ne renvoie rien
         for (const s of stocksToShow) {
           if (!s?.stock_id) continue;
           const u = `${baseUrl}?stock_id=${encodeURIComponent(s.stock_id)}&detail=1`;
-          const dRes = await fetch(u, {
-            headers: {
-              Authorization: `Bearer ${session.access_token}`,
-              'Content-Type': 'application/json'
+          try {
+            const dRes = await fetch(u, {
+              headers: {
+                Authorization: `Bearer ${session.access_token}`,
+                'Content-Type': 'application/json'
+              }
+            });
+            let items: any[] = [];
+            if (dRes.ok) {
+              const dJson = await dRes.json();
+              items = Array.isArray(dJson?.detail) ? dJson.detail : [];
             }
-          });
-          if (!dRes.ok) {
-            // Non bloquant: on loggue côté console et continue
+            if (!items.length) {
+              const { data: vRows } = await supabase
+                .from('consignment_lines_view')
+                .select('stock_id, product_id, product_sku, product_name, qty_en_depot, qty_facture_non_payee, montant_ht, tva_normal, tva_marge, imei, pam, imei_pam, serial, serial_number, sn, last_move_at')
+                .eq('stock_id', s.stock_id);
+              items = Array.isArray(vRows) ? vRows : [];
+            }
+            byStock[s.stock_id] = items as DetailRow[];
+          } catch (err) {
             // eslint-disable-next-line no-console
-            console.warn('[ConsignmentsSection] Détails indisponibles pour', s.stock_id, dRes.status);
+            console.warn('[ConsignmentsSection] Détails fallback error pour', s.stock_id, err);
             byStock[s.stock_id] = [];
-            continue;
           }
-          const dJson = await dRes.json();
-          byStock[s.stock_id] = Array.isArray(dJson?.detail) ? dJson.detail : [];
           if (cancelled) return;
         }
 
@@ -279,22 +290,18 @@ export function ConsignmentsSection() {
   return (
     <div className="space-y-6">
       {/* Bandeau KPI */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-gray-600">Total HT</span>
+            <span className="text-sm font-medium text-gray-600">Total HT + TTC TVA normale</span>
             <DollarSign size={20} className="text-blue-600" />
           </div>
-          <p className="text-2xl font-bold text-gray-900">
+          <div className="text-sm text-gray-600">Total HT</div>
+          <p className="text-xl font-bold text-gray-900 mb-1">
             {canViewVAT ? formatMoney(globalTotals.ht) : '—'}
           </p>
-        </div>
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-gray-600">TTC TVA normale</span>
-            <FileText size={20} className="text-purple-600" />
-          </div>
-          <p className="text-2xl font-bold text-gray-900">
+          <div className="text-sm text-gray-600">TTC TVA normale</div>
+          <p className="text-xl font-bold text-gray-900">
             {canViewVAT ? formatMoney(globalTotals.ttcNormale) : '—'}
           </p>
         </div>
@@ -309,7 +316,7 @@ export function ConsignmentsSection() {
         </div>
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-gray-600">TTC cumulé</span>
+            <span className="text-sm font-medium text-gray-600">Total DU Global sous traitant TVA marge + TTC</span>
             <DollarSign size={20} className="text-emerald-600" />
           </div>
           <p className="text-2xl font-bold text-gray-900">
@@ -338,7 +345,7 @@ export function ConsignmentsSection() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      <div className="flex flex-col gap-4">
         {summary.map((s) => {
           const details = detailsByStock[s.stock_id] || [];
           const totals = perStockTotals[s.stock_id] || { ht: 0, ttcNormale: 0, ttcMarge: 0, ttcCumul: 0 };
@@ -354,27 +361,21 @@ export function ConsignmentsSection() {
               </div>
 
               {/* Sous-totaux */}
-              <div className="grid grid-cols-2 gap-3 mb-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
                 <div className="bg-gray-50 rounded-md p-3">
-                  <div className="text-xs text-gray-600">HT</div>
+                  <div className="text-xs text-gray-600">Total HT + TTC TVA normale</div>
                   <div className="text-sm font-semibold text-gray-900">
-                    {canViewVAT ? formatMoney(totals.ht) : '—'}
+                    {canViewVAT ? `${formatMoney(totals.ht)}  |  ${formatMoney(totals.ttcNormale)}` : '—'}
                   </div>
                 </div>
                 <div className="bg-gray-50 rounded-md p-3">
-                  <div className="text-xs text-gray-600">TTC normale</div>
-                  <div className="text-sm font-semibold text-gray-900">
-                    {canViewVAT ? formatMoney(totals.ttcNormale) : '—'}
-                  </div>
-                </div>
-                <div className="bg-gray-50 rounded-md p-3">
-                  <div className="text-xs text-gray-600">TTC marge</div>
+                  <div className="text-xs text-gray-600">TTC TVA marge</div>
                   <div className="text-sm font-semibold text-gray-900">
                     {canViewVAT ? formatMoney(totals.ttcMarge) : '—'}
                   </div>
                 </div>
                 <div className="bg-gray-50 rounded-md p-3">
-                  <div className="text-xs text-gray-600">Dû TTC</div>
+                  <div className="text-xs text-gray-600">Total DU TVA marge + TTC</div>
                   <div className="text-sm font-semibold text-gray-900">
                     {canViewVAT ? formatMoney(totals.ttcCumul) : '—'}
                   </div>
@@ -388,20 +389,28 @@ export function ConsignmentsSection() {
                     <tr>
                       <th className="text-left py-1.5 pr-2">SKU</th>
                       <th className="text-left py-1.5 px-2">Nom</th>
-                      <th className="text-left py-1.5 px-2">IMEI/PAM</th>
-                      <th className="text-left py-1.5 px-2">N° de série</th>
+                      <th className="text-left py-1.5 px-2">IMEI/SN si PAM</th>
+                      <th className="text-left py-1.5 px-2">Qté</th>
+                      <th className="text-left py-1.5 px-2">Total ligne</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {details.slice(0, 5).map((d, idx) => {
-                      const imeiPam = (d.imei_pam || d.imei || d.pam || '') as string;
-                      const serial = (d.serial_number || d.serial || d.sn || '') as string;
+                      const idCol = (d.imei_pam || d.imei || d.serial || d.sn || d.serial_number || '') as string;
+                      const qty = Number((d as any)?.qty_en_depot ?? (d as any)?.qty ?? (d as any)?.quantity ?? 0);
+                      const totalLine = canViewVAT
+                        ? Number(d?.montant_ht || 0) +
+                          (Number(d?.tva_normal || 0) > 0
+                            ? Number(d?.tva_normal || 0)
+                            : Number(d?.tva_marge || 0))
+                        : null;
                       return (
                         <tr key={`${s.stock_id}-${idx}`}>
                           <td className="py-1.5 pr-2 text-gray-900">{d.product_sku || ''}</td>
                           <td className="py-1.5 px-2 text-gray-900">{d.product_name || ''}</td>
-                          <td className="py-1.5 px-2 text-gray-700">{imeiPam || '—'}</td>
-                          <td className="py-1.5 px-2 text-gray-700">{serial || '—'}</td>
+                          <td className="py-1.5 px-2 text-gray-700">{idCol || '—'}</td>
+                          <td className="py-1.5 px-2 text-gray-900">{qty}</td>
+                          <td className="py-1.5 px-2 text-gray-900">{canViewVAT ? formatMoney(totalLine || 0) : '—'}</td>
                         </tr>
                       );
                     })}
