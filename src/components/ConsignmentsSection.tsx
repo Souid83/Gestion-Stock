@@ -97,20 +97,37 @@ export function ConsignmentsSection() {
         // 0) Liste des stocks du groupe "SOUS TRAITANT" (pour inclure même vides)
         let groupStocks: { stock_id: string; stock_name: string }[] = [];
         try {
+          // a) Récupérer les IDs des stocks du groupe
           const { data: sg, error: sgErr } = await supabase
             .from('stock_groups')
-            .select('stock_id, stock_name, name')
+            .select('stock_id')
             .eq('name', 'SOUS TRAITANT');
+
           if (!sgErr && Array.isArray(sg)) {
-            const seen = new Set<string>();
-            groupStocks = (sg as any[]).map((r: any) => ({
-              stock_id: String(r?.stock_id || ''),
-              stock_name: String(r?.stock_name || '')
-            })).filter(s => s.stock_id).filter(s => {
-              if (seen.has(s.stock_id)) return false;
-              seen.add(s.stock_id);
-              return true;
-            });
+            const stockIds = Array.from(
+              new Set((sg as any[]).map((r: any) => String(r?.stock_id || '')).filter(Boolean))
+            );
+
+            if (stockIds.length) {
+              // b) Récupérer les noms depuis la table stocks
+              const { data: sRows, error: sErr } = await supabase
+                .from('stocks')
+                .select('id, name')
+                .in('id', stockIds);
+
+              if (!sErr && Array.isArray(sRows)) {
+                const nameById = new Map<string, string>(
+                  (sRows as any[]).map((r: any) => [String(r.id), String(r.name ?? '')])
+                );
+                groupStocks = stockIds.map((id) => ({
+                  stock_id: id,
+                  stock_name: nameById.get(id) || id
+                }));
+              } else {
+                // Fallback: au moins retourner les IDs
+                groupStocks = stockIds.map((id) => ({ stock_id: id, stock_name: id }));
+              }
+            }
           }
         } catch (_) {
           // silencieux: absence de table/colonnes → fallback sur summary
@@ -118,19 +135,30 @@ export function ConsignmentsSection() {
 
         // 1) Synthèse (expose les stocks avec activité)
         const baseUrl = '/.netlify/functions/consignments-list';
-        const res = await fetch(baseUrl, {
-          headers: {
-            Authorization: `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json'
+
+        // Tolérant: en dev local, Netlify dev peut renvoyer 404 → ne pas bloquer l'affichage des cartes de groupe
+        let rows: SummaryRow[] = [];
+        try {
+          const res = await fetch(baseUrl, {
+            headers: {
+              Authorization: `Bearer ${session.access_token}`,
+              'Content-Type': 'application/json'
+            }
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            rows = Array.isArray(data?.summary) ? data.summary : [];
+          } else {
+            // eslint-disable-next-line no-console
+            console.warn('[ConsignmentsSection] summary non disponible:', res.status);
+            rows = [];
           }
-        });
-
-        if (!res.ok) {
-          throw new Error(`Erreur API (summary): ${res.status}`);
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn('[ConsignmentsSection] summary fetch error:', e);
+          rows = [];
         }
-
-        const data = await res.json();
-        const rows: SummaryRow[] = Array.isArray(data?.summary) ? data.summary : [];
         if (cancelled) return;
 
         // 1.b) Choisir la source d’affichage: priorité aux stocks du groupe
