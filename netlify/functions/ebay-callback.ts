@@ -403,12 +403,13 @@ export const handler = async (event: any) => {
 
     console.log("✅ OAuth tokens stored successfully");
 
-    // Consume the pending state
+    // Clean up ONLY the temporary pending row for this state (do not touch the freshly inserted real token)
     try {
       await supabase
         .from('oauth_tokens')
-        .update({ access_token: 'consumed', updated_at: new Date().toISOString() } as any)
-        .eq('state_nonce', stateNonce as any);
+        .delete()
+        .eq('state_nonce', stateNonce as any)
+        .eq('access_token', 'pending');
     } catch {}
 
     {
