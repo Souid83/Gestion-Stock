@@ -4,21 +4,27 @@
 export const handler = async (event: any) => {
   const { createClient } = await import('@supabase/supabase-js');
 
-  // Fixed CORS origin per requirements
-  const ALLOW_ORIGIN = 'https://dev-gestockflow.netlify.app';
+  // CORS origin dynamique (autorise prod + dev)
+  const origin = (event.headers?.origin as string) || (event.headers?.Origin as string) || '';
+  const ALLOWED_ORIGINS = new Set([
+    'https://dev-gestockflow.netlify.app',
+    'http://localhost:5173'
+  ]);
   const corsHeaders = {
-    'Access-Control-Allow-Origin': ALLOW_ORIGIN,
-    'Access-Control-Allow-Credentials': 'true'
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.has(origin) ? origin : 'https://dev-gestockflow.netlify.app',
+    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin'
   };
 
-  // CORS preflight (fixed headers)
+  // CORS preflight
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 204,
       headers: {
         ...corsHeaders,
         'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Headers': 'content-type, authorization'
+        'Access-Control-Allow-Headers': 'content-type, authorization',
+        'Access-Control-Max-Age': '86400'
       },
       body: ''
     };
