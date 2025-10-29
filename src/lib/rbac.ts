@@ -4,11 +4,12 @@
  */
 
 // Define all available roles in the system
-export type Role = 'ADMIN_FULL' | 'COMPTABLE' | 'MAGASIN' | 'VENDEUR';
+export type Role = 'ADMIN_FULL' | 'ADMIN' | 'COMPTABLE' | 'MAGASIN' | 'VENDEUR';
 
 // Export role constants for easy reference
 export const ROLES = {
   ADMIN_FULL: 'ADMIN_FULL' as Role,
+  ADMIN: 'ADMIN' as Role,
   COMPTABLE: 'COMPTABLE' as Role,
   MAGASIN: 'MAGASIN' as Role,
   VENDEUR: 'VENDEUR' as Role,
@@ -35,6 +36,10 @@ const permissions: Record<Role, Permission[]> = {
     'createFromListing',
     'ignoreListing',
   ],
+  ADMIN: [
+    'viewOrders',
+    'viewConsignments',
+  ],
   COMPTABLE: [
     'viewOrders',
     'viewConsignments',
@@ -60,8 +65,8 @@ export function can(permission: Permission, role: Role): boolean {
  * Only ADMIN_FULL and COMPTABLE have access
  */
 export function canViewConsignments(role: Role): boolean {
-  console.log('[RBAC] canViewConsignments check:', { role, canView: role === ROLES.ADMIN_FULL || role === ROLES.COMPTABLE });
-  return role === ROLES.ADMIN_FULL || role === ROLES.COMPTABLE;
+  console.log('[RBAC] canViewConsignments check:', { role, canView: role === ROLES.ADMIN_FULL || role === ROLES.ADMIN || role === ROLES.COMPTABLE });
+  return role === ROLES.ADMIN_FULL || role === ROLES.ADMIN || role === ROLES.COMPTABLE;
 }
 
 /**
@@ -69,8 +74,8 @@ export function canViewConsignments(role: Role): boolean {
  * Only ADMIN_FULL and COMPTABLE can see VAT details
  */
 export function canViewConsignmentsVAT(role: Role): boolean {
-  console.log('[RBAC] canViewConsignmentsVAT check:', { role, canView: role === ROLES.ADMIN_FULL || role === ROLES.COMPTABLE });
-  return role === ROLES.ADMIN_FULL || role === ROLES.COMPTABLE;
+  console.log('[RBAC] canViewConsignmentsVAT check:', { role, canView: role === ROLES.ADMIN_FULL || role === ROLES.ADMIN || role === ROLES.COMPTABLE });
+  return role === ROLES.ADMIN_FULL || role === ROLES.ADMIN || role === ROLES.COMPTABLE;
 }
 
 /**
@@ -115,6 +120,7 @@ export function isComptableRole(role: Role): boolean {
 export function getRoleLabel(role: Role): string {
   const labels: Record<Role, string> = {
     ADMIN_FULL: 'Administrateur Complet',
+    ADMIN: 'Administrateur',
     COMPTABLE: 'Comptable',
     MAGASIN: 'Magasin',
     VENDEUR: 'Vendeur',
