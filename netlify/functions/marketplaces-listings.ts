@@ -76,44 +76,65 @@ export const handler = async (event: any) => {
       return { statusCode: 405, headers: JSON_HEADERS, body: JSON.stringify({ error: 'method_not_allowed' }) };
     }
 
-    // RBAC: Authenticate user and check role
-    console.info('🔐 Authenticating user...');
-    const authHeader = event.headers.authorization || event.headers.Authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.warn('⚠️ Missing or invalid authorization header');
-      return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'missing_token' }) };
-    }
+    // RBAC: Authenticate user and check role (bypass autorisé via RBAC_BYPASS=true)
+    const RBAC_BYPASS = (process.env.RBAC_BYPASS === 'true') || (process.env.RBAC_DISABLED === 'true');
+    const authHeader = event.headers?.authorization || event.headers?.Authorization;
+    let userRole: string = 'MAGASIN';
+    let userId: string | null = null;
 
-    const supabaseAccessToken = authHeader.replace('Bearer ', '');
-    const { data: { user }, error: authError } = await supabase.auth.getUser(supabaseAccessToken);
+    const hasBearer = !!authHeader && String(authHeader).startsWith('Bearer ');
 
-    if (authError || !user) {
-      console.warn('⚠️ Invalid token or user not found:', authError?.message);
-      return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'invalid_token' }) };
-    }
+    if (!hasBearer) {
+      if (RBAC_BYPASS) {
+        console.warn('RBAC bypass activé pour marketplaces-listings');
+        userRole = 'ADMIN_FULL';
+      } else {
+        return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'unauthorized' }) };
+      }
+    } else {
+      console.info('🔐 Authenticating user...');
+      const supabaseAccessToken = String(authHeader).replace('Bearer ', '');
+      const { data: { user }, error: authError } = await supabase.auth.getUser(supabaseAccessToken);
 
-    console.info('✅ User authenticated:', user.id);
+      if (authError || !user) {
+        if (RBAC_BYPASS) {
+          console.warn('RBAC bypass activé pour marketplaces-listings (token invalide)');
+          userRole = 'ADMIN_FULL';
+        } else {
+          return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'invalid_token' }) };
+        }
+      } else {
+        console.info('✅ User authenticated:', user.id);
+        userId = user.id;
 
-    // Load user role
-    const { data: profile, error: profileError } = await supabaseService
-      .from('profiles')
-      .select('role')
-      .eq('id', user.id)
-      .maybeSingle();
+        const { data: profile, error: profileError } = await supabaseService
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .maybeSingle();
 
-    if (profileError) {
-      console.error('❌ Error loading user profile:', profileError);
-      return { statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error: 'profile_load_failed' }) };
-    }
-
-    const userRole = profile?.role || 'MAGASIN';
-    console.info('👤 User role:', userRole);
-
-    // Check if user has access to pricing (ADMIN_FULL, ADMIN)
-    const allowedRoles = ['ADMIN_FULL', 'ADMIN'];
-    if (!allowedRoles.includes(userRole)) {
-      console.warn('⚠️ User role not authorized for pricing:', userRole);
-      return { statusCode: 403, headers: JSON_HEADERS, body: JSON.stringify({ error: 'insufficient_role' }) };
+        if (profileError) {
+          if (!RBAC_BYPASS) {
+            console.error('❌ Error loading user profile:', profileError);
+            return { statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error: 'profile_load_failed' }) };
+          } else {
+            userRole = 'ADMIN_FULL';
+          }
+        } else {
+          userRole = profile?.role || 'MAGASIN';
+          console.info('👤 User role:', userRole);
+          const allowedRoles = ['ADMIN_FULL', 'ADMIN'];
+          if (!allowedRoles.includes(userRole)) {
+            if (!RBAC_BYPASS) {
+              console.warn('⚠️ User role not authorized for pricing:', userRole);
+              return { statusCode: 403, headers: JSON_HEADERS, body: JSON.stringify({ error: 'insufficient_role' }) };
+            } else {
+              console.warn('RBAC bypass: overriding role check');
+              userRole = 'ADMIN_FULL';
+            }
+          }
+        }
+      }
     }
 
     const qs = event.queryStringParameters || {};
@@ -644,7 +665,7 @@ export const handler = async (event: any) => {
       // ADMIN can see purchase_price only if they created the product
       if (userRole === 'ADMIN') {
         const productCreatedBy = item.product_created_by_user_id;
-        if (productCreatedBy && productCreatedBy === user.id) {
+        if (productCreatedBy && userId && productCreatedBy === userId) {
           return item;
         }
       }
