@@ -311,34 +311,75 @@ export const handler = async (event: any) => {
             continue;
           }
 
-          // Decrement stock_produit for (parentId, EBAY_STOCK_ID)
+          // Decrement central app stock on the effective parent (shared pool > stock_total > stock)
           try {
-            const { data: spRow } = await supabaseService
-              .from('stock_produit')
-              .select('id, quantite')
-              .eq('produit_id', parentId)
-              .eq('stock_id', EBAY_STOCK_ID)
+            // Load parent stock fields
+            const { data: parentInfo } = await supabaseService
+              .from('products')
+              .select('id, shared_stock_id, stock_total, stock')
+              .eq('id', parentId)
               .maybeSingle();
 
-            if (spRow && (spRow as any).id) {
-              const currentQ = Number((spRow as any).quantite) || 0;
-              const newQ = Math.max(0, currentQ - c.quantity);
-              const { error: upErr } = await supabaseService
-                .from('stock_produit')
-                .update({ quantite: newQ, updated_at: new Date().toISOString() } as any)
-                .eq('id', (spRow as any).id as any);
-              if (upErr) {
-                console.warn('ebay-orders-sync: decrement failed', accId, parentId, upErr);
-              }
-            } else {
-              // permissive: create row with 0 (we cannot decrement below 0)
-              const { error: insErr } = await supabaseService
-                .from('stock_produit')
-                .insert([{ produit_id: parentId as any, stock_id: EBAY_STOCK_ID as any, quantite: 0 } as any]);
-              if (insErr) {
-                console.warn('ebay-orders-sync: create missing stock_produit failed', accId, parentId, insErr);
+            let decrementedWhere: 'shared_pool' | 'stock_total' | 'stock' | 'none' = 'none';
+
+            if (parentInfo && (parentInfo as any).shared_stock_id) {
+              const poolId = (parentInfo as any).shared_stock_id as string;
+              const { data: pool } = await supabaseService
+                .from('shared_stocks')
+                .select('id, quantity')
+                .eq('id', poolId)
+                .maybeSingle();
+
+              if (pool && (pool as any).id) {
+                const current = Number((pool as any).quantity) || 0;
+                const next = Math.max(0, current - c.quantity);
+                const { error: upErr } = await supabaseService
+                  .from('shared_stocks')
+                  .update({ quantity: next, updated_at: new Date().toISOString() } as any)
+                  .eq('id', (pool as any).id as any);
+                if (!upErr) decrementedWhere = 'shared_pool';
+                else console.warn('ebay-orders-sync: shared_pool decrement failed', accId, parentId, upErr);
               }
             }
+
+            if (decrementedWhere === 'none' && parentInfo) {
+              const p: any = parentInfo;
+              if (typeof p.stock_total === 'number') {
+                const next = Math.max(0, (Number(p.stock_total) || 0) - c.quantity);
+                const { error: upErr } = await supabaseService
+                  .from('products')
+                  .update({ stock_total: next, updated_at: new Date().toISOString() } as any)
+                  .eq('id', parentId as any);
+                if (!upErr) decrementedWhere = 'stock_total';
+              }
+              if (decrementedWhere === 'none' && typeof p.stock === 'number') {
+                const next = Math.max(0, (Number(p.stock) || 0) - c.quantity);
+                const { error: upErr } = await supabaseService
+                  .from('products')
+                  .update({ stock: next, updated_at: new Date().toISOString() } as any)
+                  .eq('id', parentId as any);
+                if (!upErr) decrementedWhere = 'stock';
+              }
+            }
+
+            // Optionally also decrement EBAY stock bucket if exists (keeps parity)
+            try {
+              const { data: spRow } = await supabaseService
+                .from('stock_produit')
+                .select('id, quantite')
+                .eq('produit_id', parentId)
+                .eq('stock_id', EBAY_STOCK_ID)
+                .maybeSingle();
+
+              if (spRow && (spRow as any).id) {
+                const currentQ = Number((spRow as any).quantite) || 0;
+                const newQ = Math.max(0, currentQ - c.quantity);
+                await supabaseService
+                  .from('stock_produit')
+                  .update({ quantite: newQ, updated_at: new Date().toISOString() } as any)
+                  .eq('id', (spRow as any).id as any);
+              }
+            } catch {}
 
             // Mark processed
             await upsertProcessedSafe(supabaseService, {
