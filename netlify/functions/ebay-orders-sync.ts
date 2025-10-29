@@ -13,6 +13,8 @@
 // - Best-effort; continues on errors and logs them.
 
 
+import { getOAuthToken } from './oauth';
+
 export const handler = async (event: any) => {
   const { createClient } = await import('@supabase/supabase-js');
 
@@ -21,6 +23,18 @@ export const handler = async (event: any) => {
   const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+
+  // Decrypt helper (AES-GCM, base64 ciphertext + base64 iv)
+  const SECRET_KEY = process.env.SECRET_KEY || '';
+  const decryptData = async (encrypted: string, iv: string): Promise<string> => {
+    if (!SECRET_KEY) throw new Error('SECRET_KEY not configured');
+    const keyBuffer = Buffer.from(SECRET_KEY, 'base64');
+    const cryptoKey = await crypto.subtle.importKey('raw', keyBuffer, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    const encryptedBuffer = Buffer.from(encrypted, 'base64');
+    const ivBuffer = Buffer.from(iv, 'base64');
+    const decryptedBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuffer }, cryptoKey, encryptedBuffer);
+    return new TextDecoder().decode(decryptedBuffer);
+  };
 
   try {
     // Only GET/POST
@@ -89,16 +103,15 @@ export const handler = async (event: any) => {
       const accId = account.id as string;
       const baseHost = baseHostFor(account.environment === 'sandbox' ? 'sandbox' : 'production');
 
-      // Load latest token
-      const { data: tokenRow } = await supabaseService
-        .from('oauth_tokens')
-        .select('*')
-        .eq('marketplace_account_id', accId)
-        .eq('provider', 'ebay')
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
+      // Load latest token via shared helper
+      let tokenRow: any = null;
+      try {
+        tokenRow = await getOAuthToken({
+          accountId: accId,
+          provider: 'ebay',
+          environment: (account.environment === 'sandbox' ? 'sandbox' : 'production')
+        });
+      } catch {}
       if (!tokenRow) {
         accountSummaries.push({ account_id: accId, processed: 0, reason: 'missing_token' });
         continue;
@@ -136,16 +149,46 @@ export const handler = async (event: any) => {
 
         // Handle 401 -> attempt refresh once
         if (resp.status === 401) {
-          if (!tokenRow.refresh_token || !account.client_id || !account.client_secret) {
+          // Decrypt refresh token (handle legacy JSON format if needed)
+          let refreshToken: string | null = null;
+          try {
+            if (!tokenRow.encryption_iv && typeof tokenRow.refresh_token_encrypted === 'string' && tokenRow.refresh_token_encrypted.includes('"iv"')) {
+              // legacy JSON {iv,data,tag} → base64
+              const parsed = JSON.parse(tokenRow.refresh_token_encrypted as string);
+              const ivB = Buffer.from(parsed.iv, 'hex');
+              const ctB = Buffer.concat([Buffer.from(parsed.data, 'hex'), Buffer.from(parsed.tag, 'hex')]);
+              refreshToken = await decryptData(ctB.toString('base64'), ivB.toString('base64'));
+            } else if (tokenRow.refresh_token_encrypted && tokenRow.encryption_iv) {
+              refreshToken = await decryptData(tokenRow.refresh_token_encrypted as string, tokenRow.encryption_iv as string);
+            }
+          } catch {}
+          // Resolve client credentials
+          let clientId: string = account.client_id || '';
+          let clientSecret: string = account.client_secret || '';
+          if (!clientId || !clientSecret) {
+            const { data: credentials } = await supabaseService
+              .from('provider_app_credentials')
+              .select('*')
+              .eq('provider', 'ebay')
+              .eq('environment', (account.environment === 'sandbox' ? 'sandbox' : 'production'))
+              .maybeSingle();
+            if (credentials) {
+              try {
+                clientId = await decryptData(credentials.client_id_encrypted, credentials.encryption_iv);
+                clientSecret = await decryptData(credentials.client_secret_encrypted, credentials.encryption_iv);
+              } catch {}
+            }
+          }
+          if (!clientId || !clientSecret || !refreshToken) {
             accountSummaries.push({ account_id: accId, processed: processedForAcc, reason: 'cannot_refresh' });
             break;
           }
           const refreshed = await refreshAccessToken({
-            client_id: account.client_id,
-            client_secret: account.client_secret,
-            refresh_token: tokenRow.refresh_token,
-            scopes: Array.isArray(tokenRow.scopes) && tokenRow.scopes.length > 0
-              ? tokenRow.scopes.join(' ')
+            client_id: clientId,
+            client_secret: clientSecret,
+            refresh_token: refreshToken,
+            scopes: (typeof tokenRow.scope === 'string' && tokenRow.scope)
+              ? tokenRow.scope
               : 'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
             environment: account.environment === 'sandbox' ? 'sandbox' : 'production'
           });
@@ -153,16 +196,17 @@ export const handler = async (event: any) => {
             accountSummaries.push({ account_id: accId, processed: processedForAcc, reason: 'token_expired' });
             break;
           }
-          // Persist refreshed token
-          await supabaseService.from('oauth_tokens').insert({
-            marketplace_account_id: accId,
-            provider: 'ebay',
-            environment: account.environment === 'sandbox' ? 'sandbox' : 'production',
-            access_token: refreshed.access_token,
-            refresh_token: tokenRow.refresh_token,
-            expires_in: refreshed.expires_in || null,
-            scopes: tokenRow.scopes || null
-          });
+          // Persist refreshed token on the same row
+          try {
+            await supabaseService
+              .from('oauth_tokens')
+              .update({
+                access_token: refreshed.access_token,
+                updated_at: new Date().toISOString(),
+                expires_at: refreshed.expires_in ? new Date(Date.now() + refreshed.expires_in * 1000).toISOString() : tokenRow.expires_at || null
+              } as any)
+              .eq('id', tokenRow.id as any);
+          } catch {}
           token = refreshed.access_token;
           resp = await fetch(pageUrl, { method: 'GET', headers: headers(token) });
           raw = await readText(resp);
@@ -267,34 +311,75 @@ export const handler = async (event: any) => {
             continue;
           }
 
-          // Decrement stock_produit for (parentId, EBAY_STOCK_ID)
+          // Decrement central app stock on the effective parent (shared pool > stock_total > stock)
           try {
-            const { data: spRow } = await supabaseService
-              .from('stock_produit')
-              .select('id, quantite')
-              .eq('produit_id', parentId)
-              .eq('stock_id', EBAY_STOCK_ID)
+            // Load parent stock fields
+            const { data: parentInfo } = await supabaseService
+              .from('products')
+              .select('id, shared_stock_id, stock_total, stock')
+              .eq('id', parentId)
               .maybeSingle();
 
-            if (spRow && (spRow as any).id) {
-              const currentQ = Number((spRow as any).quantite) || 0;
-              const newQ = Math.max(0, currentQ - c.quantity);
-              const { error: upErr } = await supabaseService
-                .from('stock_produit')
-                .update({ quantite: newQ, updated_at: new Date().toISOString() } as any)
-                .eq('id', (spRow as any).id as any);
-              if (upErr) {
-                console.warn('ebay-orders-sync: decrement failed', accId, parentId, upErr);
-              }
-            } else {
-              // permissive: create row with 0 (we cannot decrement below 0)
-              const { error: insErr } = await supabaseService
-                .from('stock_produit')
-                .insert([{ produit_id: parentId as any, stock_id: EBAY_STOCK_ID as any, quantite: 0 } as any]);
-              if (insErr) {
-                console.warn('ebay-orders-sync: create missing stock_produit failed', accId, parentId, insErr);
+            let decrementedWhere: 'shared_pool' | 'stock_total' | 'stock' | 'none' = 'none';
+
+            if (parentInfo && (parentInfo as any).shared_stock_id) {
+              const poolId = (parentInfo as any).shared_stock_id as string;
+              const { data: pool } = await supabaseService
+                .from('shared_stocks')
+                .select('id, quantity')
+                .eq('id', poolId)
+                .maybeSingle();
+
+              if (pool && (pool as any).id) {
+                const current = Number((pool as any).quantity) || 0;
+                const next = Math.max(0, current - c.quantity);
+                const { error: upErr } = await supabaseService
+                  .from('shared_stocks')
+                  .update({ quantity: next, updated_at: new Date().toISOString() } as any)
+                  .eq('id', (pool as any).id as any);
+                if (!upErr) decrementedWhere = 'shared_pool';
+                else console.warn('ebay-orders-sync: shared_pool decrement failed', accId, parentId, upErr);
               }
             }
+
+            if (decrementedWhere === 'none' && parentInfo) {
+              const p: any = parentInfo;
+              if (typeof p.stock_total === 'number') {
+                const next = Math.max(0, (Number(p.stock_total) || 0) - c.quantity);
+                const { error: upErr } = await supabaseService
+                  .from('products')
+                  .update({ stock_total: next, updated_at: new Date().toISOString() } as any)
+                  .eq('id', parentId as any);
+                if (!upErr) decrementedWhere = 'stock_total';
+              }
+              if (decrementedWhere === 'none' && typeof p.stock === 'number') {
+                const next = Math.max(0, (Number(p.stock) || 0) - c.quantity);
+                const { error: upErr } = await supabaseService
+                  .from('products')
+                  .update({ stock: next, updated_at: new Date().toISOString() } as any)
+                  .eq('id', parentId as any);
+                if (!upErr) decrementedWhere = 'stock';
+              }
+            }
+
+            // Optionally also decrement EBAY stock bucket if exists (keeps parity)
+            try {
+              const { data: spRow } = await supabaseService
+                .from('stock_produit')
+                .select('id, quantite')
+                .eq('produit_id', parentId)
+                .eq('stock_id', EBAY_STOCK_ID)
+                .maybeSingle();
+
+              if (spRow && (spRow as any).id) {
+                const currentQ = Number((spRow as any).quantite) || 0;
+                const newQ = Math.max(0, currentQ - c.quantity);
+                await supabaseService
+                  .from('stock_produit')
+                  .update({ quantite: newQ, updated_at: new Date().toISOString() } as any)
+                  .eq('id', (spRow as any).id as any);
+              }
+            } catch {}
 
             // Mark processed
             await upsertProcessedSafe(supabaseService, {

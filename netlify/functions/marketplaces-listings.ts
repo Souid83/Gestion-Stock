@@ -1,4 +1,5 @@
 process.env.NODE_NO_WARNINGS = process.env.NODE_NO_WARNINGS || '1';
+import { getOAuthToken } from './oauth';
 
 const MAX_SKUS_PER_RUN = parseInt(process.env.EBAY_MAX_SKUS_PER_RUN || '300', 10);
 const CONCURRENCY = Math.min(parseInt(process.env.EBAY_CONCURRENCY || '3', 10), 10);
@@ -76,48 +77,88 @@ export const handler = async (event: any) => {
       return { statusCode: 405, headers: JSON_HEADERS, body: JSON.stringify({ error: 'method_not_allowed' }) };
     }
 
-    // RBAC: Authenticate user and check role
-    console.info('🔐 Authenticating user...');
-    const authHeader = event.headers.authorization || event.headers.Authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.warn('⚠️ Missing or invalid authorization header');
-      return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'missing_token' }) };
-    }
+    // RBAC: Authenticate user and check role (bypass autorisé via RBAC_BYPASS=true)
+    const RBAC_BYPASS = (process.env.RBAC_BYPASS === 'true') || (process.env.RBAC_DISABLED === 'true');
+    const authHeader = event.headers?.authorization || event.headers?.Authorization;
+    let userRole: string = 'MAGASIN';
+    let userId: string | null = null;
 
-    const supabaseAccessToken = authHeader.replace('Bearer ', '');
-    const { data: { user }, error: authError } = await supabase.auth.getUser(supabaseAccessToken);
+    const hasBearer = !!authHeader && String(authHeader).startsWith('Bearer ');
 
-    if (authError || !user) {
-      console.warn('⚠️ Invalid token or user not found:', authError?.message);
-      return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'invalid_token' }) };
-    }
+    if (!hasBearer) {
+      if (RBAC_BYPASS) {
+        console.warn('RBAC bypass activé pour marketplaces-listings');
+        userRole = 'ADMIN_FULL';
+      } else {
+        return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'unauthorized' }) };
+      }
+    } else {
+      console.info('🔐 Authenticating user...');
+      const supabaseAccessToken = String(authHeader).replace('Bearer ', '');
+      const { data: { user }, error: authError } = await supabase.auth.getUser(supabaseAccessToken);
 
-    console.info('✅ User authenticated:', user.id);
+      if (authError || !user) {
+        if (RBAC_BYPASS) {
+          console.warn('RBAC bypass activé pour marketplaces-listings (token invalide)');
+          userRole = 'ADMIN_FULL';
+        } else {
+          return { statusCode: 401, headers: JSON_HEADERS, body: JSON.stringify({ error: 'invalid_token' }) };
+        }
+      } else {
+        console.info('✅ User authenticated:', user.id);
+        userId = user.id;
 
-    // Load user role
-    const { data: profile, error: profileError } = await supabaseService
-      .from('profiles')
-      .select('role')
-      .eq('id', user.id)
-      .maybeSingle();
+        const { data: profile, error: profileError } = await supabaseService
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .maybeSingle();
 
-    if (profileError) {
-      console.error('❌ Error loading user profile:', profileError);
-      return { statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error: 'profile_load_failed' }) };
-    }
-
-    const userRole = profile?.role || 'MAGASIN';
-    console.info('👤 User role:', userRole);
-
-    // Check if user has access to pricing (ADMIN_FULL, ADMIN)
-    const allowedRoles = ['ADMIN_FULL', 'ADMIN'];
-    if (!allowedRoles.includes(userRole)) {
-      console.warn('⚠️ User role not authorized for pricing:', userRole);
-      return { statusCode: 403, headers: JSON_HEADERS, body: JSON.stringify({ error: 'insufficient_role' }) };
+        if (profileError) {
+          if (!RBAC_BYPASS) {
+            console.error('❌ Error loading user profile:', profileError);
+            return { statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error: 'profile_load_failed' }) };
+          } else {
+            userRole = 'ADMIN_FULL';
+          }
+        } else {
+          userRole = profile?.role || 'MAGASIN';
+          console.info('👤 User role:', userRole);
+          const allowedRoles = ['ADMIN_FULL', 'ADMIN'];
+          if (!allowedRoles.includes(userRole)) {
+            if (!RBAC_BYPASS) {
+              console.warn('⚠️ User role not authorized for pricing:', userRole);
+              return { statusCode: 403, headers: JSON_HEADERS, body: JSON.stringify({ error: 'insufficient_role' }) };
+            } else {
+              console.warn('RBAC bypass: overriding role check');
+              userRole = 'ADMIN_FULL';
+            }
+          }
+        }
+      }
     }
 
     const qs = event.queryStringParameters || {};
-    const account_id = qs.account_id;
+
+    // Params + logs (provider/env/accountId)
+    const provider = (qs.provider || 'ebay') as 'ebay';
+    const environment = (qs.environment || 'production') as 'production' | 'sandbox';
+    const accountIdParam = (qs.accountId || qs.account_id || undefined) as string | undefined;
+    console.info('listings_params', { provider, environment, accountId: accountIdParam });
+
+    // Fetch token via shared helper (robuste)
+    let tok: any;
+    try {
+      tok = await getOAuthToken({ provider, environment, accountId: accountIdParam });
+    } catch (e: any) {
+      console.error('listings_token_fetch_error', e?.message || e);
+      if (e?.message === 'missing_account') return badRequest('missing_account_id');
+      if (e?.message === 'missing_token') return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing' }) };
+      return srvError('token_lookup_failed', e?.message || 'unknown');
+    }
+    console.info('listings_token_fetch', { found: !!tok, accountId_used: tok?.marketplace_account_id });
+
+    const account_id = (tok?.marketplace_account_id || accountIdParam || '') as string;
     const limit = Math.min(parseInt(qs.limit || '50', 10) || 50, 200);
     const page = Math.max(parseInt(qs.page || '1', 10) || 1, 1);
     let offset = parseInt(qs.offset || '0', 10) || 0;
@@ -144,17 +185,10 @@ export const handler = async (event: any) => {
     }
     console.info('✅ Account found:', account.id);
 
-    const { data: tokenRow, error: tokErr } = await supabaseService
-      .from('oauth_tokens')
-      .select('*')
-      .eq('marketplace_account_id', account_id)
-      .neq('access_token', 'pending')
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (tokErr || !tokenRow) {
-      console.error('❌ token_missing', tokErr);
+    // Utiliser le token récupéré via getOAuthToken
+    const tokenRow: any = tok;
+    if (!tokenRow) {
+      console.error('❌ token_missing_lookup');
       return { statusCode: 424, headers: JSON_HEADERS, body: JSON.stringify({ error: 'token_missing' }) };
     }
     console.info('✅ Token found');
@@ -395,7 +429,7 @@ export const handler = async (event: any) => {
     let productIdBySku: Record<string, string> = {};
     let internalPriceBySku: Record<string, number | null> = {};
     try {
-      // Get mappings
+      // Get mappings (primary by account), then fallback (provider-wide) if none found for continuity after reconnects
       const { data: mappings } = await supabaseService
         .from('marketplace_products_map')
         .select('remote_sku, product_id')
@@ -403,7 +437,27 @@ export const handler = async (event: any) => {
         .eq('marketplace_account_id', account_id)
         .in('remote_sku', skus);
 
-      const productIds = Array.isArray(mappings) ? mappings.map((m: any) => m.product_id).filter(Boolean) : [];
+      let productIds = Array.isArray(mappings) ? mappings.map((m: any) => m.product_id).filter(Boolean) : [];
+
+      // Fallback read-only: if no mappings for this account (e.g., after account id rotation), reuse provider-wide mappings by SKU
+      let effectiveMappings: any[] = Array.isArray(mappings) ? mappings : [];
+      if (!productIds.length) {
+        try {
+          const { data: mappingsAny } = await supabaseService
+            .from('marketplace_products_map')
+            .select('remote_sku, product_id')
+            .eq('provider', 'ebay')
+            .in('remote_sku', skus);
+          if (Array.isArray(mappingsAny) && mappingsAny.length > 0) {
+            effectiveMappings = mappingsAny;
+            productIds = mappingsAny.map((m: any) => m.product_id).filter(Boolean);
+            console.info('mappings_fallback_provider_scope_used', { count: mappingsAny.length });
+          }
+        } catch (e) {
+          console.warn('mappings_fallback_provider_scope_failed', (e as any)?.message || e);
+        }
+      }
+
       if (productIds.length > 0) {
         // Load shared quantity (view) + fallback quantities and internal price (table)
         const { data: vw } = await supabaseService
@@ -491,7 +545,7 @@ export const handler = async (event: any) => {
         });
 
         const ipBySku: Record<string, number | null> = {};
-        (mappings || []).forEach((m: any) => {
+        (effectiveMappings || []).forEach((m: any) => {
           if (m?.remote_sku && m?.product_id) {
             productIdBySku[m.remote_sku] = m.product_id;
             qtyAppBySku[m.remote_sku] = (qtyByProductId[m.product_id] ?? null);
@@ -631,7 +685,7 @@ export const handler = async (event: any) => {
       // ADMIN can see purchase_price only if they created the product
       if (userRole === 'ADMIN') {
         const productCreatedBy = item.product_created_by_user_id;
-        if (productCreatedBy && productCreatedBy === user.id) {
+        if (productCreatedBy && userId && productCreatedBy === userId) {
           return item;
         }
       }
