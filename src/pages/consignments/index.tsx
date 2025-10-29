@@ -82,7 +82,7 @@ export function Consignments() {
         return;
       }
 
-      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/consignments-list`;
+      const apiUrl = '/.netlify/functions/consignments-list';
       const params = new URLSearchParams();
       if (selectedStockId) {
         params.append('stock_id', selectedStockId);
