@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import React, { useEffect, useState } from 'react';
 import { Users, RefreshCw, AlertCircle, Package, ArrowUp, ArrowDown, FileText, DollarSign } from 'lucide-react';
 import { canViewConsignments, canViewConsignmentsVAT } from '../../lib/rbac';
@@ -65,22 +66,6 @@ export function Consignments() {
     fetchUserRole();
   }, []);
 
-  // Contrôle d'accès
-  if (!canViewConsignments(userRole)) {
-    return (
-      <div className="p-6">
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-          <div className="flex items-center gap-2 text-red-800">
-            <AlertCircle size={20} />
-            <h2 className="font-semibold">Accès refusé</h2>
-          </div>
-          <p className="text-red-700 mt-2">
-            Vous n'avez pas les permissions nécessaires pour accéder à cette page.
-          </p>
-        </div>
-      </div>
-    );
-  }
 
   const canViewVAT = canViewConsignmentsVAT(userRole);
   console.log('[Consignments] Peut voir TVA:', canViewVAT);
@@ -162,6 +147,23 @@ export function Consignments() {
     }),
     { ht: 0, ttc: 0, tva_normal: 0, tva_marge: 0 }
   );
+
+  // Contrôle d'accès
+  if (!canViewConsignments(userRole)) {
+    return (
+      <div className="p-6">
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <div className="flex items-center gap-2 text-red-800">
+            <AlertCircle size={20} />
+            <h2 className="font-semibold">Accès refusé</h2>
+          </div>
+          <p className="text-red-700 mt-2">
+            Vous n'avez pas les permissions nécessaires pour accéder à cette page.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
