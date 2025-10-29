@@ -429,7 +429,7 @@ export const handler = async (event: any) => {
     let productIdBySku: Record<string, string> = {};
     let internalPriceBySku: Record<string, number | null> = {};
     try {
-      // Get mappings
+      // Get mappings (primary by account), then fallback (provider-wide) if none found for continuity after reconnects
       const { data: mappings } = await supabaseService
         .from('marketplace_products_map')
         .select('remote_sku, product_id')
@@ -437,7 +437,27 @@ export const handler = async (event: any) => {
         .eq('marketplace_account_id', account_id)
         .in('remote_sku', skus);
 
-      const productIds = Array.isArray(mappings) ? mappings.map((m: any) => m.product_id).filter(Boolean) : [];
+      let productIds = Array.isArray(mappings) ? mappings.map((m: any) => m.product_id).filter(Boolean) : [];
+
+      // Fallback read-only: if no mappings for this account (e.g., after account id rotation), reuse provider-wide mappings by SKU
+      let effectiveMappings: any[] = Array.isArray(mappings) ? mappings : [];
+      if (!productIds.length) {
+        try {
+          const { data: mappingsAny } = await supabaseService
+            .from('marketplace_products_map')
+            .select('remote_sku, product_id')
+            .eq('provider', 'ebay')
+            .in('remote_sku', skus);
+          if (Array.isArray(mappingsAny) && mappingsAny.length > 0) {
+            effectiveMappings = mappingsAny;
+            productIds = mappingsAny.map((m: any) => m.product_id).filter(Boolean);
+            console.info('mappings_fallback_provider_scope_used', { count: mappingsAny.length });
+          }
+        } catch (e) {
+          console.warn('mappings_fallback_provider_scope_failed', (e as any)?.message || e);
+        }
+      }
+
       if (productIds.length > 0) {
         // Load shared quantity (view) + fallback quantities and internal price (table)
         const { data: vw } = await supabaseService
@@ -525,7 +545,7 @@ export const handler = async (event: any) => {
         });
 
         const ipBySku: Record<string, number | null> = {};
-        (mappings || []).forEach((m: any) => {
+        (effectiveMappings || []).forEach((m: any) => {
           if (m?.remote_sku && m?.product_id) {
             productIdBySku[m.remote_sku] = m.product_id;
             qtyAppBySku[m.remote_sku] = (qtyByProductId[m.product_id] ?? null);
