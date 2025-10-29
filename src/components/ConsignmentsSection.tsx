@@ -97,19 +97,56 @@ export function ConsignmentsSection() {
         // 0) Liste des stocks du groupe "SOUS TRAITANT" (pour inclure même vides)
         let groupStocks: { stock_id: string; stock_name: string }[] = [];
         try {
-          // a) Récupérer les IDs des stocks du groupe
-          const { data: sg, error: sgErr } = await supabase
-            .from('stock_groups')
-            .select('stock_id')
-            .eq('name', 'SOUS TRAITANT');
+          // Variantes possibles du libellé de groupe
+          const GROUP_NAMES = ['SOUS TRAITANT', 'SOUS_TRAITANT', 'SOUS-TRAITANT'];
 
-          if (!sgErr && Array.isArray(sg)) {
-            const stockIds = Array.from(
-              new Set((sg as any[]).map((r: any) => String(r?.stock_id || '')).filter(Boolean))
-            );
+          // 0.a) Tentative avec jointure (si FK stock_groups.stock → stocks.id ou stock_groups.stock_id → stocks.id)
+          try {
+            const { data: sgJoin, error: sgJoinErr } = await supabase
+              .from('stock_groups')
+              // Renommer la relation explicitement via alias "stocks"
+              .select('stock_id, stock, stocks:stocks(id,name)')
+              .in('name', GROUP_NAMES);
+
+            if (!sgJoinErr && Array.isArray(sgJoin) && sgJoin.length) {
+              const seen = new Set<string>();
+              const mapped = (sgJoin as any[]).map((r: any) => {
+                const id = String(r?.stock_id || r?.stock || '');
+                const nm = String(r?.stocks?.name ?? '') || id;
+                return { stock_id: id, stock_name: nm };
+              }).filter(s => s.stock_id && !seen.has(s.stock_id) && seen.add(s.stock_id));
+              if (mapped.length) {
+                groupStocks = mapped;
+              }
+            }
+          } catch (e) {
+            // ignore join failure, continue with manual 2-step fallback
+          }
+
+          // 0.b) Fallback 2 étapes si la jointure n'a rien remonté
+          if (groupStocks.length === 0) {
+            // Essai 1: stock_id
+            const { data: sg1, error: sgErr1 } = await supabase
+              .from('stock_groups')
+              .select('stock_id')
+              .in('name', GROUP_NAMES);
+
+            // Essai 2: stock (si la colonne s'appelle "stock" et non "stock_id"), seulement si le 1er essai est vide/erreur
+            let stockIds: string[] = [];
+            if (!sgErr1 && Array.isArray(sg1)) {
+              stockIds = (sg1 as any[]).map((r: any) => String(r?.stock_id || '')).filter(Boolean);
+            }
+            if (stockIds.length === 0) {
+              const { data: sg2 } = await supabase
+                .from('stock_groups')
+                .select('stock')
+                .in('name', GROUP_NAMES);
+              stockIds = Array.from(new Set(((sg2 as any[]) || []).map((r: any) => String(r?.stock || '')).filter(Boolean)));
+            } else {
+              stockIds = Array.from(new Set(stockIds));
+            }
 
             if (stockIds.length) {
-              // b) Récupérer les noms depuis la table stocks
               const { data: sRows, error: sErr } = await supabase
                 .from('stocks')
                 .select('id, name')
@@ -129,6 +166,10 @@ export function ConsignmentsSection() {
               }
             }
           }
+
+          // Log de contrôle
+          // eslint-disable-next-line no-console
+          console.info('[ConsignmentsSection] groupStocks:', groupStocks);
         } catch (_) {
           // silencieux: absence de table/colonnes → fallback sur summary
         }
