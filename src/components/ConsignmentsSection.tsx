@@ -218,7 +218,7 @@ export function ConsignmentsSection() {
                   .eq('stock_id', s.stock_id)
                   .gt('quantite', 0);
 
-                console.log('[ConsignmentsSection] Fallback stock_produit pour', s.stock_id, ':', spRows?.length || 0, 'produits');
+                // console.log('[ConsignmentsSection] Fallback stock_produit pour', s.stock_id, ':', spRows?.length || 0, 'produits');
 
                 if (!spErr && Array.isArray(spRows) && spRows.length > 0) {
                   // Étape 2: Récupérer les IDs des parents
@@ -226,7 +226,7 @@ export function ConsignmentsSection() {
                     .map((r: any) => r.products?.parent_id)
                     .filter(Boolean);
 
-                  console.log('[ConsignmentsSection] Récupération des parents:', parentIds.length, 'IDs');
+                  // console.log('[ConsignmentsSection] Récupération des parents:', parentIds.length, 'IDs');
 
                   // Étape 3: Récupérer les noms des parents si nécessaire
                   let parentsMap = new Map<string, string>();
@@ -240,7 +240,7 @@ export function ConsignmentsSection() {
                       parentsData.forEach((p: any) => {
                         parentsMap.set(p.id, p.name);
                       });
-                      console.log('[ConsignmentsSection] Parents récupérés:', parentsMap.size);
+                      // console.log('[ConsignmentsSection] Parents récupérés:', parentsMap.size);
                     }
                   }
 
@@ -256,17 +256,17 @@ export function ConsignmentsSection() {
                     const unitPrice = proPrice > 0 ? proPrice : retailPrice;
                     const totalLinePrice = unitPrice * qty;
 
-                    console.log('[ConsignmentsSection] Fallback - Article mappé:', {
-                      sku: prod?.sku,
-                      serial: prod?.serial_number,
-                      parent_id: prod?.parent_id,
-                      parent: parentName,
-                      pro_price: proPrice,
-                      retail_price: retailPrice,
-                      unitPrice,
-                      qty,
-                      totalLine: totalLinePrice
-                    });
+                    // console.log('[ConsignmentsSection] Fallback - Article mappé:', {
+                    //   sku: prod?.sku,
+                    //   serial: prod?.serial_number,
+                    //   parent_id: prod?.parent_id,
+                    //   parent: parentName,
+                    //   pro_price: proPrice,
+                    //   retail_price: retailPrice,
+                    //   unitPrice,
+                    //   qty,
+                    //   totalLine: totalLinePrice
+                    // });
 
                     return {
                       consignment_id: null,
@@ -324,72 +324,54 @@ export function ConsignmentsSection() {
 
   // Fonctions d'agrégation
   const computeTotals = (rows: DetailRow[]) => {
-    console.log('[ConsignmentsSection] Calcul des totaux pour', rows.length, 'lignes');
+    // console.log('[ConsignmentsSection] Calcul des totaux pour', rows.length, 'lignes');
     let ht = 0;
     let ttcNormale = 0;  // Total TTC pour TVA normale
     let ttcMarge = 0;    // Total TTC pour TVA marge
-    let ttcCumul = 0;    // Total TTC cumulé (pour compatibilité)
 
     for (const r of rows || []) {
-      // Déterminer le régime de TVA
+      // Déterminer le régime de TVA - source de vérité
       const vatRegime = String(r?.vat_regime || '').toUpperCase();
       const isMarge = vatRegime === 'MARGE';
 
       // Récupérer le prix total de la ligne (déjà calculé par l'API ou le fallback)
       const totalLinePrice = Number(r?.total_line_price || 0);
-      const qty = Number(r?.qty_en_depot || 0);
 
-      console.log('[ConsignmentsSection] Ligne traitement:', {
-        sku: r?.product_sku,
-        vat_regime: vatRegime,
-        isMarge,
-        total_line_price: totalLinePrice,
-        qty,
-        unit_price: r?.unit_price
-      });
+      // console.log('[ConsignmentsSection] Ligne traitement:', {
+      //   sku: r?.product_sku,
+      //   vat_regime: vatRegime,
+      //   isMarge,
+      //   total_line_price: totalLinePrice
+      // });
 
-      // Si on a un prix total, l'utiliser directement
+      // Utiliser uniquement total_line_price pour éviter la double comptabilisation
       if (totalLinePrice > 0) {
         if (isMarge) {
           ttcMarge += totalLinePrice;
-          console.log('[ConsignmentsSection] → Ajouté à TVA Marge:', totalLinePrice);
+          // console.log('[ConsignmentsSection] → Ajouté à TVA Marge:', totalLinePrice);
         } else {
+          // TVA normale ou pas de régime défini
           ttcNormale += totalLinePrice;
-          console.log('[ConsignmentsSection] → Ajouté à TTC Normal:', totalLinePrice);
+          // console.log('[ConsignmentsSection] → Ajouté à TVA Normale:', totalLinePrice);
         }
-        ttcCumul += totalLinePrice;
       }
 
-      // Fallback: utiliser les montants HT et TVA si disponibles
+      // Calculer HT (pour compatibilité avec anciens calculs)
       const mht = Number(r?.montant_ht || 0);
-      const tvn = Number(r?.tva_normal || 0);
-      const tvm = Number(r?.tva_marge || 0);
-
-      if (mht > 0 || tvn > 0 || tvm > 0) {
+      if (mht > 0) {
         ht += mht;
-        const ttcLigne = mht + tvn + tvm;
-
-        if (isMarge && tvm > 0) {
-          ttcMarge += ttcLigne;
-          console.log('[ConsignmentsSection] → (Fallback) Ajouté à TVA Marge:', ttcLigne);
-        } else if (!isMarge && (mht > 0 || tvn > 0)) {
-          ttcNormale += ttcLigne;
-          console.log('[ConsignmentsSection] → (Fallback) Ajouté à TTC Normal:', ttcLigne);
-        }
-
-        if (totalLinePrice === 0) {
-          ttcCumul += ttcLigne;
-        }
       }
     }
 
-    console.log('[ConsignmentsSection] Totaux calculés:', {
-      ht,
-      ttcNormale,
-      ttcMarge,
-      ttcCumul,
-      totalRows: rows.length
-    });
+    const ttcCumul = ttcNormale + ttcMarge;
+
+    // console.log('[ConsignmentsSection] Totaux calculés:', {
+    //   ht,
+    //   ttcNormale,
+    //   ttcMarge,
+    //   ttcCumul,
+    //   totalRows: rows.length
+    // });
 
     return { ht, ttc: ttcCumul, ttcNormale, ttcMarge, ttcCumul };
   };
@@ -417,13 +399,13 @@ export function ConsignmentsSection() {
       gTTCMarge += t.ttcMarge || 0;
     }
     const gTotalCombine = gTTCNormale + gTTCMarge;
-    console.log('[ConsignmentsSection] Totaux globaux:', {
-      ht: gHT,
-      ttc: gTTC,
-      ttcNormale: gTTCNormale,
-      ttcMarge: gTTCMarge,
-      totalCombine: gTotalCombine
-    });
+    // console.log('[ConsignmentsSection] Totaux globaux:', {
+    //   ht: gHT,
+    //   ttc: gTTC,
+    //   ttcNormale: gTTCNormale,
+    //   ttcMarge: gTTCMarge,
+    //   totalCombine: gTotalCombine
+    // });
     return { ht: gHT, ttc: gTTC, ttcNormale: gTTCNormale, ttcMarge: gTTCMarge, totalCombine: gTotalCombine };
   }, [summary, perStockTotals]);
 
@@ -519,6 +501,7 @@ export function ConsignmentsSection() {
                     <tr>
                       <th className="text-left py-1.5 pr-2">SKU</th>
                       <th className="text-left py-1.5 px-2">Nom</th>
+                      <th className="text-center py-1.5 px-2">Type TVA</th>
                       <th className="text-left py-1.5 px-2">Numéro de série</th>
                       <th className="text-left py-1.5 px-2">Qté</th>
                       <th className="text-right py-1.5 px-2">Prix unitaire</th>
@@ -543,26 +526,35 @@ export function ConsignmentsSection() {
                       // Déterminer le badge TVA
                       const vatRegime = String(d?.vat_regime || '').toUpperCase();
                       const isMarge = vatRegime === 'MARGE';
-                      const badgeText = isMarge ? 'TVM' : 'TTC';
+                      const badgeText = isMarge ? 'TVA Marge' : 'TVA Normale';
                       const badgeClass = isMarge ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800';
 
-                      console.log('[ConsignmentsSection] Affichage ligne:', {
-                        sku: d.product_sku,
-                        displayName,
-                        serialNumber,
-                        parent_id: d.parent_id,
-                        parent_name: d.parent_name,
-                        qty,
-                        unitPrice,
-                        totalLinePrice,
-                        vat_regime: d.vat_regime,
-                        badgeText
-                      });
+                      // console.log('[ConsignmentsSection] Affichage ligne:', {
+                      //   sku: d.product_sku,
+                      //   displayName,
+                      //   serialNumber,
+                      //   parent_id: d.parent_id,
+                      //   parent_name: d.parent_name,
+                      //   qty,
+                      //   unitPrice,
+                      //   totalLinePrice,
+                      //   vat_regime: d.vat_regime,
+                      //   badgeText
+                      // });
 
                       return (
                         <tr key={`${s.stock_id}-${idx}`}>
                           <td className="py-1.5 pr-2 text-gray-900">{d.product_sku || ''}</td>
                           <td className="py-1.5 px-2 text-gray-900">{displayName}</td>
+                          <td className="py-1.5 px-2 text-center">
+                            {canViewVAT && d.vat_regime ? (
+                              <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${badgeClass}`}>
+                                {badgeText}
+                              </span>
+                            ) : (
+                              <span className="text-gray-400 text-xs">—</span>
+                            )}
+                          </td>
                           <td className="py-1.5 px-2 text-gray-700">{serialNumber}</td>
                           <td className="py-1.5 px-2 text-gray-900">{qty}</td>
                           <td className="py-1.5 px-2 text-right text-gray-900">
@@ -575,18 +567,13 @@ export function ConsignmentsSection() {
                           </td>
                           <td className="py-1.5 px-2 text-right text-gray-900 font-medium">
                             {canViewVAT ? formatMoney(totalLinePrice) : '—'}
-                            {canViewVAT && d.vat_regime && (
-                              <span className={`ml-2 px-1.5 py-0.5 rounded text-xs font-medium ${badgeClass}`}>
-                                {badgeText}
-                              </span>
-                            )}
                           </td>
                         </tr>
                       );
                     })}
                     {details.length === 0 && (
                       <tr>
-                        <td colSpan={6} className="py-2 text-gray-500">Aucun article</td>
+                        <td colSpan={7} className="py-2 text-gray-500">Aucun article</td>
                       </tr>
                     )}
                   </tbody>
