@@ -20,15 +20,13 @@ export function SearchBar({ onSearch, placeholder = 'Rechercher...' }: SearchBar
     if (onSearch) {
       onSearch(query);
     }
+    // Vider le champ après soumission pour éviter les conflits avec la barre du listing
+    setQuery('');
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setQuery(value);
-    // Optional: trigger search on every keystroke
-    if (onSearch) {
-      onSearch(value);
-    }
   };
 
   return (
@@ -37,6 +35,7 @@ export function SearchBar({ onSearch, placeholder = 'Rechercher...' }: SearchBar
         <button
           type="submit"
           aria-label="Rechercher"
+          onClick={(e) => handleSearch(e as any)}
           className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"
         >
           <Search size={20} />
