@@ -213,22 +213,55 @@ export function ConsignmentsSection() {
               try {
                 const { data: spRows, error: spErr } = await supabase
                   .from('stock_produit')
-                  .select('produit_id, quantite, products(name, sku)')
+                  .select('produit_id, quantite, products(name, sku, serial_number, parent_id, product_type, pro_price, vat_regime, retail_price, parent:products!parent_id(name))')
                   .eq('stock_id', s.stock_id)
                   .gt('quantite', 0);
 
+                console.log('[ConsignmentsSection] Fallback stock_produit pour', s.stock_id, ':', spRows?.length || 0, 'produits');
+
                 if (!spErr && Array.isArray(spRows) && spRows.length > 0) {
-                  items = (spRows as any[]).map((r: any) => ({
-                    consignment_id: null,
-                    product_id: r.produit_id,
-                    product_name: r.products?.name ?? null,
-                    product_sku: r.products?.sku ?? null,
-                    qty_en_depot: Number(r.quantite || 0),
-                    // Pas de valorisation sans consignments → montants/TVA null
-                    montant_ht: null,
-                    tva_normal: null,
-                    tva_marge: null
-                  }));
+                  items = (spRows as any[]).map((r: any) => {
+                    const prod = r.products;
+                    const parentName = Array.isArray(prod?.parent) ? prod.parent[0]?.name : prod?.parent?.name;
+                    const proPrice = Number(prod?.pro_price || 0);
+                    const retailPrice = Number(prod?.retail_price || 0);
+                    const qty = Number(r.quantite || 0);
+
+                    // Utiliser pro_price ou retail_price comme prix unitaire
+                    const unitPrice = proPrice > 0 ? proPrice : retailPrice;
+                    const totalLinePrice = unitPrice * qty;
+
+                    console.log('[ConsignmentsSection] Fallback - Article mappé:', {
+                      sku: prod?.sku,
+                      serial: prod?.serial_number,
+                      parent: parentName,
+                      pro_price: proPrice,
+                      retail_price: retailPrice,
+                      unitPrice,
+                      qty,
+                      totalLine: totalLinePrice
+                    });
+
+                    return {
+                      consignment_id: null,
+                      product_id: r.produit_id,
+                      product_name: prod?.name ?? null,
+                      product_sku: prod?.sku ?? null,
+                      serial_number: prod?.serial_number ?? null,
+                      parent_id: prod?.parent_id ?? null,
+                      parent_name: parentName ?? null,
+                      product_type: prod?.product_type ?? null,
+                      pro_price: proPrice,
+                      vat_regime: prod?.vat_regime ?? null,
+                      unit_price: unitPrice,
+                      total_line_price: totalLinePrice,
+                      qty_en_depot: qty,
+                      // Pas de valorisation sans consignments → montants/TVA null
+                      montant_ht: null,
+                      tva_normal: null,
+                      tva_marge: null
+                    };
+                  });
                 }
               } catch (e) {
                 // eslint-disable-next-line no-console
