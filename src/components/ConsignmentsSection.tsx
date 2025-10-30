@@ -502,7 +502,6 @@ export function ConsignmentsSection() {
                     <tr>
                       <th className="text-left py-1.5 pr-2">SKU</th>
                       <th className="text-left py-1.5 px-2">Nom</th>
-                      <th className="text-center py-1.5 px-2">Type TVA</th>
                       <th className="text-left py-1.5 px-2">Numéro de série</th>
                       <th className="text-left py-1.5 px-2">Qté</th>
                       <th className="text-right py-1.5 px-2">Prix unitaire</th>
@@ -547,15 +546,6 @@ export function ConsignmentsSection() {
                         <tr key={`${s.stock_id}-${idx}`}>
                           <td className="py-1.5 pr-2 text-gray-900">{d.product_sku || ''}</td>
                           <td className="py-1.5 px-2 text-gray-900">{displayName}</td>
-                          <td className="py-1.5 px-2 text-center">
-                            {canViewVAT && d.vat_regime ? (
-                              <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-semibold ${badgeClass}`}>
-                                {badgeText}
-                              </span>
-                            ) : (
-                              <span className="text-gray-400 text-xs">—</span>
-                            )}
-                          </td>
                           <td className="py-1.5 px-2 text-gray-700">{serialNumber}</td>
                           <td className="py-1.5 px-2 text-gray-900">{qty}</td>
                           <td className="py-1.5 px-2 text-right text-gray-900">
@@ -567,14 +557,21 @@ export function ConsignmentsSection() {
                             )}
                           </td>
                           <td className="py-1.5 px-2 text-right text-gray-900 font-medium">
-                            {canViewVAT ? formatMoney(totalLinePrice) : '—'}
+                            <div className="inline-flex items-center justify-end gap-2 w-full">
+                              <span>{canViewVAT ? formatMoney(totalLinePrice) : '—'}</span>
+                              {canViewVAT && d.vat_regime ? (
+                                <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-semibold ${badgeClass}`}>
+                                  {badgeText}
+                                </span>
+                              ) : null}
+                            </div>
                           </td>
                         </tr>
                       );
                     })}
                     {details.length === 0 && (
                       <tr>
-                        <td colSpan={7} className="py-2 text-gray-500">Aucun article</td>
+                        <td colSpan={6} className="py-2 text-gray-500">Aucun article</td>
                       </tr>
                     )}
                   </tbody>
