@@ -506,7 +506,7 @@ function App() {
   }
 
   const renderContent = () => {
-    const content: React.ReactNode = (() => {
+    const content: any = (() => {
       switch (currentPage) {
         case 'select-type':
           return isAdminUser ? <ProductTypeSelection /> : <div className="p-6">Accès non autorisé</div>;
@@ -915,7 +915,30 @@ function App() {
                 : 'opacity-100'
             } transition-opacity duration-200`}
           >
-            <SearchBar />
+            <SearchBar onSearch={(q) => {
+              try {
+                const STORAGE_KEY = 'products:list:state:v1';
+                const raw = sessionStorage.getItem(STORAGE_KEY);
+                const st = raw ? JSON.parse(raw) : {};
+                st.search = q;
+                sessionStorage.setItem(STORAGE_KEY, JSON.stringify(st));
+              } catch {}
+              // Mettre à jour l'URL pour fiabiliser (fallback côté listing)
+              try {
+                const u = new URL(window.location.href);
+                u.searchParams.set('page', 'product-list');
+                if (q) u.searchParams.set('search', q);
+                window.history.replaceState({}, '', `${u.pathname}${u.search}${u.hash}`);
+              } catch {}
+              // Naviguer vers la page liste
+              setCurrentPage('product-list');
+              // Émettre l'évènement de recherche (différé pour laisser le temps au composant de monter)
+              try {
+                setTimeout(() => {
+                  window.dispatchEvent(new CustomEvent('products:global-search', { detail: { q } }));
+                }, 0);
+              } catch {}
+            }} />
           </div>
         </div>
 
