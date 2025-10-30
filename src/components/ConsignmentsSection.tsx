@@ -34,6 +34,7 @@ type DetailRow = {
   vat_regime?: string | null;
   unit_price?: number | null;
   total_line_price?: number | null;
+  pro_price?: number | null;
 };
 
 type DetailsByStock = Record<string, DetailRow[]>;
@@ -404,6 +405,7 @@ export function ConsignmentsSection() {
                       <th className="text-left py-1.5 pr-2">SKU</th>
                       <th className="text-left py-1.5 px-2">Nom</th>
                       <th className="text-left py-1.5 px-2">Numéro de série</th>
+                      <th className="text-right py-1.5 px-2">Prix vente pro</th>
                       <th className="text-left py-1.5 px-2">Qté</th>
                       <th className="text-right py-1.5 px-2">Prix unitaire</th>
                       <th className="text-right py-1.5 px-2">Prix total ligne</th>
@@ -420,7 +422,8 @@ export function ConsignmentsSection() {
                       // Quantité
                       const qty = Number(d?.qty_en_depot ?? 0);
 
-                      // Prix unitaire et total
+                      // Prix vente pro, prix unitaire et total
+                      const proPrice = Number(d?.pro_price || 0);
                       const unitPrice = Number(d?.unit_price || 0);
                       const totalLinePrice = Number(d?.total_line_price || 0);
 
@@ -430,6 +433,7 @@ export function ConsignmentsSection() {
                         serialNumber,
                         parent_id: d.parent_id,
                         parent_name: d.parent_name,
+                        pro_price: proPrice,
                         qty,
                         unitPrice,
                         totalLinePrice,
@@ -441,6 +445,9 @@ export function ConsignmentsSection() {
                           <td className="py-1.5 pr-2 text-gray-900">{d.product_sku || ''}</td>
                           <td className="py-1.5 px-2 text-gray-900">{displayName}</td>
                           <td className="py-1.5 px-2 text-gray-700">{serialNumber}</td>
+                          <td className="py-1.5 px-2 text-right text-gray-900">
+                            {canViewVAT ? formatMoney(proPrice) : '—'}
+                          </td>
                           <td className="py-1.5 px-2 text-gray-900">{qty}</td>
                           <td className="py-1.5 px-2 text-right text-gray-900">
                             {canViewVAT ? formatMoney(unitPrice) : '—'}
@@ -458,7 +465,7 @@ export function ConsignmentsSection() {
                     })}
                     {details.length === 0 && (
                       <tr>
-                        <td colSpan={6} className="py-2 text-gray-500">Aucun article</td>
+                        <td colSpan={7} className="py-2 text-gray-500">Aucun article</td>
                       </tr>
                     )}
                   </tbody>
