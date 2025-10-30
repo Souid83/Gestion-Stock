@@ -205,6 +205,35 @@ export function ConsignmentsSection() {
               console.warn('[ConsignmentsSection] Détails indisponibles (API) pour', s.stock_id, dRes.status);
               items = [];
             }
+
+            // Fallback local: si aucun détail via consignments, afficher le stock réel (stock_produit)
+            if (!items || items.length === 0) {
+              try {
+                const { data: spRows, error: spErr } = await supabase
+                  .from('stock_produit')
+                  .select('produit_id, quantite, products(name, sku)')
+                  .eq('stock_id', s.stock_id)
+                  .gt('quantite', 0);
+
+                if (!spErr && Array.isArray(spRows) && spRows.length > 0) {
+                  items = (spRows as any[]).map((r: any) => ({
+                    consignment_id: null,
+                    product_id: r.produit_id,
+                    product_name: r.products?.name ?? null,
+                    product_sku: r.products?.sku ?? null,
+                    qty_en_depot: Number(r.quantite || 0),
+                    // Pas de valorisation sans consignments → montants/TVA null
+                    montant_ht: null,
+                    tva_normal: null,
+                    tva_marge: null
+                  }));
+                }
+              } catch (e) {
+                // eslint-disable-next-line no-console
+                console.warn('[ConsignmentsSection] Fallback stock_produit error pour', s.stock_id, e);
+              }
+            }
+
             byStock[s.stock_id] = items as DetailRow[];
           } catch (err) {
             // eslint-disable-next-line no-console
@@ -413,7 +442,7 @@ export function ConsignmentsSection() {
                     })}
                     {details.length === 0 && (
                       <tr>
-                        <td colSpan={4} className="py-2 text-gray-500">Aucun article</td>
+                        <td colSpan={5} className="py-2 text-gray-500">Aucun article</td>
                       </tr>
                     )}
                   </tbody>
