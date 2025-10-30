@@ -47,6 +47,7 @@ export interface Database {
           // Mirror system fields
           mirror_of?: string | null
           product_type?: 'PAU' | 'PAM' | null
+          vat_regime?: 'NORMAL' | 'MARGE' | null
         }
         Insert: {
           id?: string
@@ -85,6 +86,7 @@ export interface Database {
           // Mirror system fields
           mirror_of?: string | null
           product_type?: 'PAU' | 'PAM' | null
+          vat_regime?: 'NORMAL' | 'MARGE' | null
         }
         Update: {
           id?: string
@@ -123,6 +125,7 @@ export interface Database {
           // Mirror system fields
           mirror_of?: string | null
           product_type?: 'PAU' | 'PAM' | null
+          vat_regime?: 'NORMAL' | 'MARGE' | null
         }
       }
       shared_stocks: {
@@ -254,6 +257,7 @@ export interface Database {
           // Mirror system fields
           mirror_of?: string | null
           product_type?: 'PAU' | 'PAM' | null
+          vat_regime?: 'NORMAL' | 'MARGE' | null
           shared_quantity?: number | null
           mirror_type?: string | null
           mirror_parent_id?: string | null
