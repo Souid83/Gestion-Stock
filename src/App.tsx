@@ -506,7 +506,7 @@ function App() {
   }
 
   const renderContent = () => {
-    const content: any = (() => {
+    const content: React.ReactNode = (() => {
       switch (currentPage) {
         case 'select-type':
           return isAdminUser ? <ProductTypeSelection /> : <div className="p-6">Accès non autorisé</div>;
@@ -915,19 +915,7 @@ function App() {
                 : 'opacity-100'
             } transition-opacity duration-200`}
           >
-            <SearchBar onSearch={(q) => {
-              try {
-                const STORAGE_KEY = 'products:list:state:v1';
-                const raw = sessionStorage.getItem(STORAGE_KEY);
-                const st = raw ? JSON.parse(raw) : {};
-                st.search = q;
-                sessionStorage.setItem(STORAGE_KEY, JSON.stringify(st));
-              } catch {}
-              setCurrentPage('product-list');
-              try {
-                window.dispatchEvent(new CustomEvent('products:global-search', { detail: { q } }));
-              } catch {}
-            }} />
+            <SearchBar />
           </div>
         </div>
 
