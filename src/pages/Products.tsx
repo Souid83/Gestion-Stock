@@ -282,21 +282,45 @@ export const Products = () => {
         };
         if (isLikelySerial(query)) {
           try {
+            // 1) Chercher dans serial_number
             const { data: serialRows, error: serialErr } = await supabase
               .from('products')
-              .select('parent_id, mirror_of')
-              .or(`serial_number.ilike.%${query}%,imei.ilike.%${query}%`)
+              .select('id, sku, parent_id, mirror_of')
+              .ilike('serial_number' as any, `%${query}%` as any)
               .limit(5000);
-            if (!serialErr && serialRows) {
-              const parentIds = Array.from(
-                new Set(((serialRows as any[]) || [])
+
+            let parentIds: string[] = [];
+            if (!serialErr && Array.isArray(serialRows)) {
+              parentIds = Array.from(
+                new Set(serialRows
                   .map((r: any) => r?.parent_id || (r as any)?.mirror_of)
                   .filter(Boolean))
               );
-              if (parentIds.length > 0) {
-                idConstraint = intersectIds(idConstraint, parentIds);
-                console.log('[applyFilters] IMEI/SN matched parents:', parentIds.length);
+            }
+
+            // 2) Fallback: si rien trouvé, tenter sur SKU (enfant dont le SKU contient le n° de série)
+            if (parentIds.length === 0) {
+              try {
+                const { data: skuRows } = await supabase
+                  .from('products')
+                  .select('id, sku, parent_id, mirror_of')
+                  .ilike('sku' as any, `%${query}%` as any)
+                  .limit(5000);
+                if (Array.isArray(skuRows)) {
+                  parentIds = Array.from(
+                    new Set(skuRows
+                      .map((r: any) => r?.parent_id || (r as any)?.mirror_of)
+                      .filter(Boolean))
+                  );
+                }
+              } catch (e2) {
+                console.warn('IMEI/SN fallback via SKU failed:', e2);
               }
+            }
+
+            if (parentIds.length > 0) {
+              idConstraint = intersectIds(idConstraint, parentIds);
+              console.log('[applyFilters] IMEI/SN matched parents (serial or SKU):', parentIds.length);
             }
           } catch (e) {
             console.warn('IMEI/SN prefilter failed:', e);
@@ -613,11 +637,13 @@ export const Products = () => {
             }
           }
 
-          // Appliquer comme contrainte d’IDs
-          idConstraint = intersectIds(idConstraint, parentIds);
+          // Appliquer comme contrainte d’IDs uniquement si des parents ont été trouvés
+          if (Array.isArray(parentIds) && parentIds.length > 0) {
+            idConstraint = intersectIds(idConstraint, parentIds);
+          }
         } catch (e) {
           console.error('PAM depot prefilter error:', e);
-          idConstraint = intersectIds(idConstraint, []); // aucun résultat
+          // Ne pas restreindre le périmètre en cas d'erreur
         }
       }
 
@@ -1093,6 +1119,22 @@ export const Products = () => {
     window.addEventListener('products:global-search', onGlobalSearch as any);
     return () => window.removeEventListener('products:global-search', onGlobalSearch as any);
   }, [applyFilters]);
+
+  // Fallback: récupérer ?search=... depuis l'URL au montage (au cas où l'évènement arrive trop tôt)
+  useEffect(() => {
+    try {
+      const u = new URL(window.location.href);
+      const s = u.searchParams.get('search');
+      if (s) {
+        setCurrentSearchQuery(s);
+        applyFilters(s);
+        u.searchParams.delete('search');
+        window.history.replaceState({}, '', `${u.pathname}${u.search}${u.hash}`);
+      }
+    } catch {}
+    // run once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Relancer la recherche dès que la valeur restaurée/éditée change
   useEffect(() => {
