@@ -326,27 +326,72 @@ export function ConsignmentsSection() {
   const computeTotals = (rows: DetailRow[]) => {
     console.log('[ConsignmentsSection] Calcul des totaux pour', rows.length, 'lignes');
     let ht = 0;
-    let ttc = 0;
+    let ttcNormale = 0;  // Total TTC pour TVA normale
+    let ttcMarge = 0;    // Total TTC pour TVA marge
+    let ttcCumul = 0;    // Total TTC cumulé (pour compatibilité)
 
     for (const r of rows || []) {
+      // Déterminer le régime de TVA
+      const vatRegime = String(r?.vat_regime || '').toUpperCase();
+      const isMarge = vatRegime === 'MARGE';
+
+      // Récupérer le prix total de la ligne (déjà calculé par l'API ou le fallback)
+      const totalLinePrice = Number(r?.total_line_price || 0);
+      const qty = Number(r?.qty_en_depot || 0);
+
+      console.log('[ConsignmentsSection] Ligne traitement:', {
+        sku: r?.product_sku,
+        vat_regime: vatRegime,
+        isMarge,
+        total_line_price: totalLinePrice,
+        qty,
+        unit_price: r?.unit_price
+      });
+
+      // Si on a un prix total, l'utiliser directement
+      if (totalLinePrice > 0) {
+        if (isMarge) {
+          ttcMarge += totalLinePrice;
+          console.log('[ConsignmentsSection] → Ajouté à TVA Marge:', totalLinePrice);
+        } else {
+          ttcNormale += totalLinePrice;
+          console.log('[ConsignmentsSection] → Ajouté à TTC Normal:', totalLinePrice);
+        }
+        ttcCumul += totalLinePrice;
+      }
+
+      // Fallback: utiliser les montants HT et TVA si disponibles
       const mht = Number(r?.montant_ht || 0);
       const tvn = Number(r?.tva_normal || 0);
       const tvm = Number(r?.tva_marge || 0);
 
-      ht += mht;
-      ttc += mht + tvn + tvm;
+      if (mht > 0 || tvn > 0 || tvm > 0) {
+        ht += mht;
+        const ttcLigne = mht + tvn + tvm;
 
-      console.log('[ConsignmentsSection] Ligne:', {
-        sku: r?.product_sku,
-        montant_ht: mht,
-        tva_normal: tvn,
-        tva_marge: tvm,
-        ttc_ligne: mht + tvn + tvm
-      });
+        if (isMarge && tvm > 0) {
+          ttcMarge += ttcLigne;
+          console.log('[ConsignmentsSection] → (Fallback) Ajouté à TVA Marge:', ttcLigne);
+        } else if (!isMarge && (mht > 0 || tvn > 0)) {
+          ttcNormale += ttcLigne;
+          console.log('[ConsignmentsSection] → (Fallback) Ajouté à TTC Normal:', ttcLigne);
+        }
+
+        if (totalLinePrice === 0) {
+          ttcCumul += ttcLigne;
+        }
+      }
     }
 
-    console.log('[ConsignmentsSection] Totaux calculés:', { ht, ttc });
-    return { ht, ttc };
+    console.log('[ConsignmentsSection] Totaux calculés:', {
+      ht,
+      ttcNormale,
+      ttcMarge,
+      ttcCumul,
+      totalRows: rows.length
+    });
+
+    return { ht, ttc: ttcCumul, ttcNormale, ttcMarge, ttcCumul };
   };
 
   const perStockTotals = useMemo(() => {
@@ -361,14 +406,25 @@ export function ConsignmentsSection() {
   const globalTotals = useMemo(() => {
     let gHT = 0;
     let gTTC = 0;
+    let gTTCNormale = 0;
+    let gTTCMarge = 0;
     for (const s of summary) {
       const t = perStockTotals[s.stock_id];
       if (!t) continue;
       gHT += t.ht;
       gTTC += t.ttc;
+      gTTCNormale += t.ttcNormale || 0;
+      gTTCMarge += t.ttcMarge || 0;
     }
-    console.log('[ConsignmentsSection] Totaux globaux:', { ht: gHT, ttc: gTTC });
-    return { ht: gHT, ttc: gTTC };
+    const gTotalCombine = gTTCNormale + gTTCMarge;
+    console.log('[ConsignmentsSection] Totaux globaux:', {
+      ht: gHT,
+      ttc: gTTC,
+      ttcNormale: gTTCNormale,
+      ttcMarge: gTTCMarge,
+      totalCombine: gTotalCombine
+    });
+    return { ht: gHT, ttc: gTTC, ttcNormale: gTTCNormale, ttcMarge: gTTCMarge, totalCombine: gTotalCombine };
   }, [summary, perStockTotals]);
 
   const formatMoney = (v: number) => euro.format(v || 0);
@@ -387,20 +443,20 @@ export function ConsignmentsSection() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-gray-600">Total HT Global</span>
+            <span className="text-sm font-medium text-gray-600">Total du TTC TVA normal</span>
             <DollarSign size={20} className="text-blue-600" />
           </div>
           <p className="text-2xl font-bold text-gray-900">
-            {canViewVAT ? formatMoney(globalTotals.ht) : '—'}
+            {canViewVAT ? formatMoney(globalTotals.ttcNormale) : '—'}
           </p>
         </div>
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-gray-600">Total TTC Global (HT + TVA)</span>
+            <span className="text-sm font-medium text-gray-600">Total du TVA Marge</span>
             <DollarSign size={20} className="text-emerald-600" />
           </div>
           <p className="text-2xl font-bold text-gray-900">
-            {canViewVAT ? formatMoney(globalTotals.ttc) : '—'}
+            {canViewVAT ? formatMoney(globalTotals.ttcMarge) : '—'}
           </p>
         </div>
       </div>
@@ -443,15 +499,15 @@ export function ConsignmentsSection() {
               {/* Sous-totaux */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
                 <div className="bg-gray-50 rounded-md p-3">
-                  <div className="text-xs text-gray-600">Total HT</div>
+                  <div className="text-xs text-gray-600">Total du TTC TVA normal</div>
                   <div className="text-sm font-semibold text-gray-900">
-                    {canViewVAT ? formatMoney(totals.ht) : '—'}
+                    {canViewVAT ? formatMoney(totals.ttcNormale || 0) : '—'}
                   </div>
                 </div>
                 <div className="bg-gray-50 rounded-md p-3">
-                  <div className="text-xs text-gray-600">Total TTC (HT + TVA)</div>
+                  <div className="text-xs text-gray-600">Total du TVA Marge</div>
                   <div className="text-sm font-semibold text-gray-900">
-                    {canViewVAT ? formatMoney(totals.ttc) : '—'}
+                    {canViewVAT ? formatMoney(totals.ttcMarge || 0) : '—'}
                   </div>
                 </div>
               </div>
@@ -464,7 +520,6 @@ export function ConsignmentsSection() {
                       <th className="text-left py-1.5 pr-2">SKU</th>
                       <th className="text-left py-1.5 px-2">Nom</th>
                       <th className="text-left py-1.5 px-2">Numéro de série</th>
-                      <th className="text-right py-1.5 px-2">Prix vente pro</th>
                       <th className="text-left py-1.5 px-2">Qté</th>
                       <th className="text-right py-1.5 px-2">Prix unitaire</th>
                       <th className="text-right py-1.5 px-2">Prix total ligne</th>
@@ -481,10 +536,15 @@ export function ConsignmentsSection() {
                       // Quantité
                       const qty = Number(d?.qty_en_depot ?? 0);
 
-                      // Prix vente pro, prix unitaire et total
-                      const proPrice = Number(d?.pro_price || 0);
+                      // Prix unitaire et total
                       const unitPrice = Number(d?.unit_price || 0);
                       const totalLinePrice = Number(d?.total_line_price || 0);
+
+                      // Déterminer le badge TVA
+                      const vatRegime = String(d?.vat_regime || '').toUpperCase();
+                      const isMarge = vatRegime === 'MARGE';
+                      const badgeText = isMarge ? 'TVM' : 'TTC';
+                      const badgeClass = isMarge ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800';
 
                       console.log('[ConsignmentsSection] Affichage ligne:', {
                         sku: d.product_sku,
@@ -492,11 +552,11 @@ export function ConsignmentsSection() {
                         serialNumber,
                         parent_id: d.parent_id,
                         parent_name: d.parent_name,
-                        pro_price: proPrice,
                         qty,
                         unitPrice,
                         totalLinePrice,
-                        vat_regime: d.vat_regime
+                        vat_regime: d.vat_regime,
+                        badgeText
                       });
 
                       return (
@@ -504,27 +564,29 @@ export function ConsignmentsSection() {
                           <td className="py-1.5 pr-2 text-gray-900">{d.product_sku || ''}</td>
                           <td className="py-1.5 px-2 text-gray-900">{displayName}</td>
                           <td className="py-1.5 px-2 text-gray-700">{serialNumber}</td>
-                          <td className="py-1.5 px-2 text-right text-gray-900">
-                            {canViewVAT ? formatMoney(proPrice) : '—'}
-                          </td>
                           <td className="py-1.5 px-2 text-gray-900">{qty}</td>
                           <td className="py-1.5 px-2 text-right text-gray-900">
                             {canViewVAT ? formatMoney(unitPrice) : '—'}
                             {canViewVAT && d.vat_regime && (
                               <span className="text-xs text-gray-500 ml-1">
-                                {d.vat_regime === 'MARGE' ? '(TTC)' : '(HT)'}
+                                {isMarge ? '(TTC)' : '(HT)'}
                               </span>
                             )}
                           </td>
                           <td className="py-1.5 px-2 text-right text-gray-900 font-medium">
                             {canViewVAT ? formatMoney(totalLinePrice) : '—'}
+                            {canViewVAT && d.vat_regime && (
+                              <span className={`ml-2 px-1.5 py-0.5 rounded text-xs font-medium ${badgeClass}`}>
+                                {badgeText}
+                              </span>
+                            )}
                           </td>
                         </tr>
                       );
                     })}
                     {details.length === 0 && (
                       <tr>
-                        <td colSpan={7} className="py-2 text-gray-500">Aucun article</td>
+                        <td colSpan={6} className="py-2 text-gray-500">Aucun article</td>
                       </tr>
                     )}
                   </tbody>
