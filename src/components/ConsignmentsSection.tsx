@@ -185,7 +185,7 @@ export function ConsignmentsSection() {
 
         // 2) Détails par stock (pour agrégations locales)
         const byStock: DetailsByStock = {};
-        // Charger séquentiellement avec fallback direct Supabase si l'API ne renvoie rien
+        // Charger séquentiellement (API Netlify uniquement)
         for (const s of stocksToShow) {
           if (!s?.stock_id) continue;
           const u = `${baseUrl}?stock_id=${encodeURIComponent(s.stock_id)}&detail=1`;
@@ -200,18 +200,15 @@ export function ConsignmentsSection() {
             if (dRes.ok) {
               const dJson = await dRes.json();
               items = Array.isArray(dJson?.detail) ? dJson.detail : [];
-            }
-            if (!items.length) {
-              const { data: vRows } = await supabase
-                .from('consignment_lines_view')
-                .select('stock_id, product_id, product_sku, product_name, qty_en_depot, qty_facture_non_payee, montant_ht, tva_normal, tva_marge, imei, pam, imei_pam, serial, serial_number, sn, last_move_at')
-                .eq('stock_id', s.stock_id);
-              items = Array.isArray(vRows) ? vRows : [];
+            } else {
+              // eslint-disable-next-line no-console
+              console.warn('[ConsignmentsSection] Détails indisponibles (API) pour', s.stock_id, dRes.status);
+              items = [];
             }
             byStock[s.stock_id] = items as DetailRow[];
           } catch (err) {
             // eslint-disable-next-line no-console
-            console.warn('[ConsignmentsSection] Détails fallback error pour', s.stock_id, err);
+            console.warn('[ConsignmentsSection] Détails API error pour', s.stock_id, err);
             byStock[s.stock_id] = [];
           }
           if (cancelled) return;
