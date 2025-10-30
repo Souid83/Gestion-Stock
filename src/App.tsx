@@ -427,7 +427,7 @@ function App() {
           console.log('[Notifications] Notifications chargées:', notifResult.unread_count);
         }
 
-        // Charger le montant dû depuis consignments
+        // Charger le montant dû depuis consignments avec distinction TVA normale / TVA marge
         const consigUrl = `/.netlify/functions/consignments-list`;
         const consigResponse = await fetch(consigUrl, {
           headers: {
@@ -438,11 +438,63 @@ function App() {
 
         if (consigResponse.ok) {
           const consigResult = await consigResponse.json();
-          const totalDu = (consigResult.summary || []).reduce((acc: number, item: any) => {
-            return acc + (item.total_ttc || 0);
-          }, 0);
+          const summaryRows = consigResult.summary || [];
+
+          console.log('[App] Calcul du montant dû pour', summaryRows.length, 'stocks');
+
+          // Charger les détails pour chaque stock et recalculer avec distinction TVA
+          let totalTTCNormale = 0;
+          let totalTVAMarge = 0;
+
+          for (const stockRow of summaryRows) {
+            const stockId = stockRow.stock_id;
+            if (!stockId) continue;
+
+            try {
+              const detailUrl = `${consigUrl}?stock_id=${encodeURIComponent(stockId)}&detail=1`;
+              const detailRes = await fetch(detailUrl, {
+                headers: {
+                  'Authorization': `Bearer ${session.access_token}`,
+                  'Content-Type': 'application/json'
+                }
+              });
+
+              if (detailRes.ok) {
+                const detailData = await detailRes.json();
+                const details = detailData.detail || [];
+
+                console.log('[App] Stock', stockId, '- traitement de', details.length, 'lignes');
+
+                for (const line of details) {
+                  const vatRegime = String(line?.vat_regime || '').toUpperCase();
+                  const isMarge = vatRegime === 'MARGE';
+                  const totalLinePrice = Number(line?.total_line_price || 0);
+
+                  if (totalLinePrice > 0) {
+                    if (isMarge) {
+                      totalTVAMarge += totalLinePrice;
+                      console.log('[App] → Ligne TVA Marge:', totalLinePrice);
+                    } else {
+                      totalTTCNormale += totalLinePrice;
+                      console.log('[App] → Ligne TVA Normale:', totalLinePrice);
+                    }
+                  }
+                }
+              } else {
+                console.warn('[App] Impossible de charger les détails pour stock', stockId, detailRes.status);
+              }
+            } catch (err) {
+              console.warn('[App] Erreur lors du chargement des détails pour stock', stockId, err);
+            }
+          }
+
+          const totalDu = totalTTCNormale + totalTVAMarge;
           setMontantDu(totalDu);
-          console.log('[Consignments] Montant dû total:', totalDu);
+          console.log('[App] Montant dû total calculé:', {
+            ttcNormale: totalTTCNormale,
+            tvaMarge: totalTVAMarge,
+            totalCombine: totalDu
+          });
         }
       } catch (error) {
         console.error('[Notifications] Erreur chargement:', error);
