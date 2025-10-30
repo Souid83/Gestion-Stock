@@ -324,7 +324,7 @@ export function ConsignmentsSection() {
 
   // Fonctions d'agrégation
   const computeTotals = (rows: DetailRow[]) => {
-    // console.log('[ConsignmentsSection] Calcul des totaux pour', rows.length, 'lignes');
+    console.log('[ConsignmentsSection] Calcul des totaux pour', rows.length, 'lignes');
     let ht = 0;
     let ttcNormale = 0;  // Total TTC pour TVA normale
     let ttcMarge = 0;    // Total TTC pour TVA marge
@@ -337,22 +337,22 @@ export function ConsignmentsSection() {
       // Récupérer le prix total de la ligne (déjà calculé par l'API ou le fallback)
       const totalLinePrice = Number(r?.total_line_price || 0);
 
-      // console.log('[ConsignmentsSection] Ligne traitement:', {
-      //   sku: r?.product_sku,
-      //   vat_regime: vatRegime,
-      //   isMarge,
-      //   total_line_price: totalLinePrice
-      // });
+      console.log('[ConsignmentsSection] Ligne traitement:', {
+        sku: r?.product_sku,
+        vat_regime: vatRegime,
+        isMarge,
+        total_line_price: totalLinePrice
+      });
 
       // Utiliser uniquement total_line_price pour éviter la double comptabilisation
       if (totalLinePrice > 0) {
         if (isMarge) {
           ttcMarge += totalLinePrice;
-          // console.log('[ConsignmentsSection] → Ajouté à TVA Marge:', totalLinePrice);
+          console.log('[ConsignmentsSection] → Ajouté à TVA Marge:', totalLinePrice);
         } else {
           // TVA normale ou pas de régime défini
           ttcNormale += totalLinePrice;
-          // console.log('[ConsignmentsSection] → Ajouté à TVA Normale:', totalLinePrice);
+          console.log('[ConsignmentsSection] → Ajouté à TVA Normale:', totalLinePrice);
         }
       }
 
@@ -365,13 +365,13 @@ export function ConsignmentsSection() {
 
     const ttcCumul = ttcNormale + ttcMarge;
 
-    // console.log('[ConsignmentsSection] Totaux calculés:', {
-    //   ht,
-    //   ttcNormale,
-    //   ttcMarge,
-    //   ttcCumul,
-    //   totalRows: rows.length
-    // });
+    console.log('[ConsignmentsSection] Totaux calculés:', {
+      ht,
+      ttcNormale,
+      ttcMarge,
+      ttcCumul,
+      totalRows: rows.length
+    });
 
     return { ht, ttc: ttcCumul, ttcNormale, ttcMarge, ttcCumul };
   };
@@ -399,13 +399,13 @@ export function ConsignmentsSection() {
       gTTCMarge += t.ttcMarge || 0;
     }
     const gTotalCombine = gTTCNormale + gTTCMarge;
-    // console.log('[ConsignmentsSection] Totaux globaux:', {
-    //   ht: gHT,
-    //   ttc: gTTC,
-    //   ttcNormale: gTTCNormale,
-    //   ttcMarge: gTTCMarge,
-    //   totalCombine: gTotalCombine
-    // });
+    console.log('[ConsignmentsSection] Totaux globaux:', {
+      ht: gHT,
+      ttc: gTTC,
+      ttcNormale: gTTCNormale,
+      ttcMarge: gTTCMarge,
+      totalCombine: gTotalCombine
+    });
     return { ht: gHT, ttc: gTTC, ttcNormale: gTTCNormale, ttcMarge: gTTCMarge, totalCombine: gTotalCombine };
   }, [summary, perStockTotals]);
 
@@ -467,6 +467,7 @@ export function ConsignmentsSection() {
         {summary.map((s) => {
           const details = detailsByStock[s.stock_id] || [];
           const totals = perStockTotals[s.stock_id] || { ht: 0, ttcNormale: 0, ttcMarge: 0, ttcCumul: 0 };
+          console.log('[ConsignmentsSection] Totaux pour stock', s.stock_name, ':', totals);
           return (
             <div key={s.stock_id} className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
               <div className="flex items-center justify-between mb-3">
@@ -523,10 +524,10 @@ export function ConsignmentsSection() {
                       const unitPrice = Number(d?.unit_price || 0);
                       const totalLinePrice = Number(d?.total_line_price || 0);
 
-                      // Déterminer le badge TVA
+                      // Déterminer le badge TVA compact
                       const vatRegime = String(d?.vat_regime || '').toUpperCase();
                       const isMarge = vatRegime === 'MARGE';
-                      const badgeText = isMarge ? 'TVA Marge' : 'TVA Normale';
+                      const badgeText = isMarge ? 'TVM' : 'TTC';
                       const badgeClass = isMarge ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800';
 
                       // console.log('[ConsignmentsSection] Affichage ligne:', {
@@ -548,7 +549,7 @@ export function ConsignmentsSection() {
                           <td className="py-1.5 px-2 text-gray-900">{displayName}</td>
                           <td className="py-1.5 px-2 text-center">
                             {canViewVAT && d.vat_regime ? (
-                              <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${badgeClass}`}>
+                              <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-semibold ${badgeClass}`}>
                                 {badgeText}
                               </span>
                             ) : (
