@@ -29,62 +29,7 @@ function escXml(s: string) {
     .replace(/'/g, '&apos;');
 }
 
-async function dymoFetch(path: string, init?: RequestInit) {
-  console.log('[DYMO] Attempting fetch to:', path);
-  const httpsUrl = `https://127.0.0.1:41951${path}`;
-  const httpUrl = `http://127.0.0.1:41951${path}`;
-  try {
-    const response = await fetch(httpsUrl, { ...init, mode: 'cors' });
-    console.log('[DYMO] HTTPS request successful', { url: httpsUrl, status: response.status });
-    return response;
-  } catch (errHttps: any) {
-    console.warn('[DYMO] HTTPS request failed:', errHttps?.message || errHttps);
-    try {
-      if (typeof window !== 'undefined' && window.location?.protocol === 'https:') {
-        console.warn('[DYMO] HTTP fallback may be blocked due to mixed content (site served over HTTPS).');
-      }
-      const response = await fetch(httpUrl, { ...init, mode: 'cors' });
-      console.log('[DYMO] HTTP fallback successful', { url: httpUrl, status: response.status });
-      return response;
-    } catch (errHttp: any) {
-      const hint =
-        (typeof window !== 'undefined' && window.location?.protocol === 'https:')
-          ? 'Possible mixed content blocked or untrusted localhost certificate. Try trusting https://127.0.0.1:41951 in the browser or serve app over HTTP on LAN.'
-          : 'DYMO Web Service not running or unreachable on 127.0.0.1:41951.';
-      const composed = `[DYMO] Both HTTPS (${httpsUrl}) and HTTP (${httpUrl}) attempts failed. Hint: ${hint}. HTTPS error: ${errHttps?.message || errHttps}. HTTP error: ${errHttp?.message || errHttp}.`;
-      console.error(composed);
-      throw new Error(composed);
-    }
-  }
-}
 
-async function chooseDymoPrinter(): Promise<string | null> {
-  console.log('[DYMO] Fetching connected printers...');
-  const status = await dymoFetch('/DYMO/DLS/Printing/StatusConnectedPrinters');
-  if (!status.ok) {
-    console.error('[DYMO] Failed to fetch printer status');
-    return null;
-  }
-
-  const data = await status.json();
-  console.log('[DYMO] Printer status response:', data);
-
-  const printers: Array<{ Name: string; ModelName: string; IsConnected: boolean }> =
-    data?.Printers ?? [];
-
-  const lw450 = printers.filter(p => /LabelWriter/i.test(p.ModelName || p.Name));
-  console.log('[DYMO] Found LabelWriter printers:', lw450);
-
-  if (lw450.length === 0) {
-    console.warn('[DYMO] No LabelWriter printers found');
-    return null;
-  }
-
-  const pref = lw450.find(p => /450/i.test(p.ModelName || p.Name)) || lw450[0];
-  console.log('[DYMO] Selected printer:', pref.Name);
-
-  return pref.Name;
-}
 
 function buildLabelXml() {
   return `<?xml version="1.0" encoding="utf-8"?>
@@ -267,73 +212,51 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
     setBusy(true);
 
     try {
-      console.log('[DYMO] Step 1: Checking if DYMO service is running...');
-      const ping = await dymoFetch('/DYMO/DLS/Printing/IsWebServiceRunning');
-
-      if (!ping.ok) {
-        console.error('[DYMO] Service ping failed');
-        alert(
-          "Service DYMO indisponible.\n\n" +
-          "Veuillez vérifier:\n" +
-          "1. DYMO Connect est installé\n" +
-          "2. Le service DYMO est démarré\n" +
-          "3. L'imprimante DYMO LabelWriter 450 est connectée"
-        );
+      // Nouveau flux imposé: utiliser exclusivement https://localhost:41951
+      // 1) Vérifier disponibilité du service DYMO (POST /Check avec Content-Length: 0)
+      try {
+        const checkRes = await fetch('https://localhost:41951/DYMO/DLS/Printing/Check', {
+          method: 'POST',
+          headers: { 'Content-Length': '0' }
+        });
+        if (!checkRes.ok) {
+          console.error('[DYMO] Localhost /Check not OK:', checkRes.status);
+          alert('Service DYMO non détecté – lancez DYMO Connect for Desktop et autorisez le certificat local.');
+          return;
+        }
+      } catch (err) {
+        console.error('[DYMO] Localhost /Check failed:', err);
+        alert('Service DYMO non détecté – lancez DYMO Connect for Desktop et autorisez le certificat local.');
         return;
       }
 
-      const pingResult = await ping.text();
-      console.log('[DYMO] Service ping result:', pingResult);
-
-      console.log('[DYMO] Step 2: Selecting printer...');
-      const printer = await chooseDymoPrinter();
-
-      if (!printer) {
-        console.error('[DYMO] No printer found');
-        alert(
-          "Aucune DYMO LabelWriter détectée.\n\n" +
-          "Veuillez vérifier:\n" +
-          "1. L'imprimante DYMO LabelWriter 450 est connectée via USB\n" +
-          "2. L'imprimante est allumée\n" +
-          "3. Les pilotes DYMO sont installés"
-        );
-        return;
-      }
-
-      console.log('[DYMO] Step 3: Preparing print job...');
+      // 2) Préparer l’étiquette et envoyer la commande d’impression (POST /PrintLabel JSON)
       const labelXml = buildLabelXml();
-      const labelSetXml = buildLabelSetXml(product);
+      const printBody = {
+        printerName: 'DYMO LabelWriter 450',
+        labelXml,
+        copies: 1
+      };
 
-      console.log('[DYMO] Label XML length:', labelXml.length);
-      console.log('[DYMO] LabelSet XML length:', labelSetXml.length);
-
-      const body = new URLSearchParams({
-        printerName: printer,
-        printParamsXml: '',
-        labelXml: labelXml,
-        labelSetXml: labelSetXml
-      });
-
-      console.log('[DYMO] Step 4: Sending print job to printer...');
-      const res = await dymoFetch('/DYMO/DLS/Printing/PrintLabel', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        body: body
-      });
-
-      if (!res.ok) {
-        const errorText = await res.text();
-        console.error('[DYMO] Print failed:', errorText);
-        throw new Error('Échec impression DYMO: ' + res.status);
+      try {
+        const res = await fetch('https://localhost:41951/DYMO/DLS/Printing/PrintLabel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(printBody)
+        });
+        if (!res.ok) {
+          const errorText = await res.text().catch(() => '');
+          console.error('[DYMO] PrintLabel not OK:', res.status, errorText);
+          throw new Error('Échec impression DYMO: ' + res.status);
+        }
+      } catch (err) {
+        console.error('[DYMO] Print request failed:', err);
+        throw err;
       }
 
-      const result = await res.text();
-      console.log('[DYMO] Print result:', result);
-      console.log('[DYMO] Print successful!');
-
-      alert(`Étiquette envoyée à ${printer}\n\nProduit: ${product.name || 'N/A'}\nN° série: ${product.serial_number || product.imei || 'N/A'}`);
+      // 3) Confirmation
+      alert('Étiquette envoyée à l’imprimante');
+      return;
     } catch (e) {
       console.error('[DYMO] Error during print:', e);
       alert(
