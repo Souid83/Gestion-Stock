@@ -420,6 +420,26 @@ export function ConsignmentsSection() {
     return { ht: gHT, ttc: gTTC, ttcNormale: gTTCNormale, ttcMarge: gTTCMarge, totalCombine: gTotalCombine };
   }, [summary, perStockTotals]);
 
+  // Tri décroissant par montant dû (ttc), zéros en fin
+  const sortedSummary = useMemo(() => {
+    const list = [...summary];
+    list.sort((a, b) => {
+      const ta = (perStockTotals[a.stock_id]?.ttc ?? 0);
+      const tb = (perStockTotals[b.stock_id]?.ttc ?? 0);
+      if (tb !== ta) return tb - ta;
+      return (a.stock_name || '').localeCompare(b.stock_name || '');
+    });
+    return list;
+  }, [summary, perStockTotals]);
+
+  // Émettre le total combiné pour App.tsx (bandeau bleu)
+  useEffect(() => {
+    try {
+      const total = globalTotals?.totalCombine || 0;
+      window.dispatchEvent(new CustomEvent('consignments:global-total', { detail: { total } }));
+    } catch {}
+  }, [globalTotals?.totalCombine]);
+
   const formatMoney = (v: number) => euro.format(v || 0);
 
   // Rendu
@@ -474,8 +494,8 @@ export function ConsignmentsSection() {
         </div>
       )}
 
-      <div className="flex flex-col gap-4">
-        {summary.map((s) => {
+      <div className="flex flex-col gap-4 max-h-[700px] overflow-y-auto pr-1">
+        {sortedSummary.map((s) => {
           const details = detailsByStock[s.stock_id] || [];
           const totals = perStockTotals[s.stock_id] || { ht: 0, ttcNormale: 0, ttcMarge: 0, ttcCumul: 0 };
           console.log('[ConsignmentsSection] Totaux pour stock', s.stock_name, ':', totals);
@@ -516,8 +536,8 @@ export function ConsignmentsSection() {
                       <th className="text-center py-1.5 px-2">Type TVA</th>
                       <th className="text-left py-1.5 px-2">Numéro de série</th>
                       <th className="text-left py-1.5 px-2">Qté</th>
-                      <th className="text-right py-1.5 px-2">Prix unitaire</th>
-                      <th className="text-right py-1.5 px-2">Prix total ligne</th>
+                      <th className="text-right py-1.5 px-2">Prix Unit. TTC</th>
+                      <th className="text-right py-1.5 px-2">Prix Total TTC</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
@@ -539,7 +559,9 @@ export function ConsignmentsSection() {
                       const vatRaw = (d as any)?.vat_regime ?? (d as any)?.vat_type ?? null;
                       const isMarge = normalizeVat(vatRaw) === 'MARGE';
                       const badgeText = isMarge ? 'TVM' : 'TTC';
-                      const badgeClass = isMarge ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800';
+                      const badgeClass = isMarge
+                        ? 'bg-white text-blue-600 border border-blue-600'
+                        : 'bg-white text-black border border-black';
 
                       // console.log('[ConsignmentsSection] Affichage ligne:', {
                       //   sku: d.product_sku,
@@ -571,21 +593,9 @@ export function ConsignmentsSection() {
                           <td className="py-1.5 px-2 text-gray-900">{qty}</td>
                           <td className="py-1.5 px-2 text-right text-gray-900">
                             {canViewVAT ? formatMoney(unitPrice) : '—'}
-                            {canViewVAT && ((d as any).vat_regime || (d as any).vat_type) && (
-                              <span className="text-xs text-gray-500 ml-1">
-                                {isMarge ? '(TTC)' : '(HT)'}
-                              </span>
-                            )}
                           </td>
                           <td className="py-1.5 px-2 text-right text-gray-900 font-medium">
-                            <div className="inline-flex items-center justify-end gap-2 w-full">
-                              <span>{canViewVAT ? formatMoney(totalLinePrice) : '—'}</span>
-                              {canViewVAT && ((d as any).vat_regime || (d as any).vat_type) ? (
-                                <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-semibold ${badgeClass}`}>
-                                  {badgeText}
-                                </span>
-                              ) : null}
-                            </div>
+                            {canViewVAT ? formatMoney(totalLinePrice) : '—'}
                           </td>
                         </tr>
                       );
