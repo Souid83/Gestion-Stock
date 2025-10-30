@@ -34,7 +34,13 @@ export function SearchBar({ onSearch, placeholder = 'Rechercher...' }: SearchBar
   return (
     <form onSubmit={handleSearch} className="relative w-full max-w-lg">
       <div className="relative">
-        <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
+        <button
+          type="submit"
+          aria-label="Rechercher"
+          className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"
+        >
+          <Search size={20} />
+        </button>
         <input
           type="text"
           value={query}
