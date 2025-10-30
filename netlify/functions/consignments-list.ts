@@ -247,10 +247,18 @@ export const handler = async (event: any) => {
 
       const { data: detailResult, error: detailError } = await detailQuery;
 
+      let useFallback = false;
       if (detailError) {
         console.error('[consignments-list] Erreur chargement détails:', detailError);
-        // Non bloquant, on continue
-      } else {
+        const msg = String((detailError as any)?.message || '');
+        const code = (detailError as any)?.code || '';
+        const missingView = msg.toLowerCase().includes('does not exist') || code === '42P01';
+        useFallback = missingView;
+      } else if (!detailResult || detailResult.length === 0) {
+        useFallback = true;
+      }
+
+      if (!useFallback && detailResult) {
         console.log('[consignments-list] Détails chargés:', detailResult?.length || 0, 'produits');
 
         // Masquer les montants si nécessaire
@@ -265,6 +273,107 @@ export const handler = async (event: any) => {
           }
           return item;
         });
+      } else {
+        // Fallback: reconstruire les lignes depuis consignments + consignment_moves
+        console.log('[consignments-list] Fallback détail via consignments/consignment_moves pour stock:', stockId);
+        const { data: consRows, error: consErr } = await supabaseService
+          .from('consignments')
+          .select(`
+            id,
+            stock_id,
+            product_id,
+            product:products(name,sku),
+            moves:consignment_moves(qty,type,unit_price_ht,vat_rate,vat_regime,created_at)
+          `)
+          .eq('stock_id', stockId);
+
+        if (consErr) {
+          console.error('[consignments-list] Fallback erreur consignments:', consErr);
+        } else {
+          const linesMap = new Map<string, any>();
+
+          for (const c of (consRows || [])) {
+            const pid = c.product_id as string;
+            const key = pid;
+            const prod = Array.isArray(c.product) ? c.product[0] : c.product;
+            const productName = prod?.name ?? null;
+            const productSku = prod?.sku ?? null;
+            const moves = Array.isArray(c.moves) ? c.moves : [];
+
+            let qtyDepot = 0;
+            let qtyFactureNP = 0;
+            let montantHT = 0;
+            let tvaNormale = 0;
+            let tvaMarge = 0;
+            let lastMoveAt: string | null = null;
+
+            for (const m of moves) {
+              const q = Number(m.qty || 0);
+              const up = Number(m.unit_price_ht || 0);
+              const vatRate = Number(m.vat_rate || 0);
+              const regime = String(m.vat_regime || '').toUpperCase();
+              const t = String(m.type || '').toUpperCase();
+
+              if (t === 'OUT') qtyDepot += q;
+              else if (t === 'RETURN') qtyDepot -= q;
+
+              if (t === 'INVOICE') qtyFactureNP += q;
+              else if (t === 'PAYMENT') qtyFactureNP -= q;
+
+              if (t === 'OUT' || t === 'INVOICE') {
+                montantHT += up * q;
+                if (regime === 'NORMAL') tvaNormale += up * q * vatRate;
+                if (regime === 'MARGE') tvaMarge += up * q * vatRate;
+              } else if (t === 'PAYMENT') {
+                montantHT -= up * q;
+                if (regime === 'NORMAL') tvaNormale -= up * q * vatRate;
+                if (regime === 'MARGE') tvaMarge -= up * q * vatRate;
+              }
+
+              const ts = m.created_at ? new Date(m.created_at).toISOString() : null;
+              if (ts && (!lastMoveAt || ts > lastMoveAt)) lastMoveAt = ts;
+            }
+
+            const row = {
+              consignment_id: c.id,
+              stock_id: c.stock_id,
+              product_id: pid,
+              product_name: productName,
+              product_sku: productSku,
+              qty_en_depot: qtyDepot,
+              qty_facture_non_payee: qtyFactureNP,
+              montant_ht: montantHT,
+              tva_normal: tvaNormale,
+              tva_marge: tvaMarge,
+              last_move_at: lastMoveAt
+            };
+
+            // Appliquer filtre de recherche si demandé
+            if (searchQuery) {
+              const ql = searchQuery.toLowerCase();
+              const match =
+                (String(productName || '').toLowerCase().includes(ql)) ||
+                (String(productSku || '').toLowerCase().includes(ql));
+              if (!match) continue;
+            }
+
+            linesMap.set(key, row);
+          }
+
+          detailData = Array.from(linesMap.values()).map((item: any) => {
+            if (!canViewVAT) {
+              return {
+                ...item,
+                montant_ht: null,
+                tva_normal: null,
+                tva_marge: null
+              };
+            }
+            return item;
+          });
+
+          console.log('[consignments-list] Fallback détails construits:', detailData.length);
+        }
       }
     }
 
