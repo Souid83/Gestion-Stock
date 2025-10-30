@@ -211,18 +211,43 @@ export function ConsignmentsSection() {
             // Fallback local: si aucun détail via consignments, afficher le stock réel (stock_produit)
             if (!items || items.length === 0) {
               try {
+                // Étape 1: Récupérer les produits depuis stock_produit (sans jointure parent)
                 const { data: spRows, error: spErr } = await supabase
                   .from('stock_produit')
-                  .select('produit_id, quantite, products(name, sku, serial_number, parent_id, product_type, pro_price, vat_regime, retail_price, parent:products!parent_id(name))')
+                  .select('produit_id, quantite, products(name, sku, serial_number, parent_id, product_type, pro_price, vat_regime, retail_price)')
                   .eq('stock_id', s.stock_id)
                   .gt('quantite', 0);
 
                 console.log('[ConsignmentsSection] Fallback stock_produit pour', s.stock_id, ':', spRows?.length || 0, 'produits');
 
                 if (!spErr && Array.isArray(spRows) && spRows.length > 0) {
+                  // Étape 2: Récupérer les IDs des parents
+                  const parentIds = (spRows as any[])
+                    .map((r: any) => r.products?.parent_id)
+                    .filter(Boolean);
+
+                  console.log('[ConsignmentsSection] Récupération des parents:', parentIds.length, 'IDs');
+
+                  // Étape 3: Récupérer les noms des parents si nécessaire
+                  let parentsMap = new Map<string, string>();
+                  if (parentIds.length > 0) {
+                    const { data: parentsData, error: parentsErr } = await supabase
+                      .from('products')
+                      .select('id, name')
+                      .in('id', parentIds);
+
+                    if (!parentsErr && Array.isArray(parentsData)) {
+                      parentsData.forEach((p: any) => {
+                        parentsMap.set(p.id, p.name);
+                      });
+                      console.log('[ConsignmentsSection] Parents récupérés:', parentsMap.size);
+                    }
+                  }
+
+                  // Étape 4: Mapper les données
                   items = (spRows as any[]).map((r: any) => {
                     const prod = r.products;
-                    const parentName = Array.isArray(prod?.parent) ? prod.parent[0]?.name : prod?.parent?.name;
+                    const parentName = prod?.parent_id ? (parentsMap.get(prod.parent_id) || null) : null;
                     const proPrice = Number(prod?.pro_price || 0);
                     const retailPrice = Number(prod?.retail_price || 0);
                     const qty = Number(r.quantite || 0);
@@ -234,6 +259,7 @@ export function ConsignmentsSection() {
                     console.log('[ConsignmentsSection] Fallback - Article mappé:', {
                       sku: prod?.sku,
                       serial: prod?.serial_number,
+                      parent_id: prod?.parent_id,
                       parent: parentName,
                       pro_price: proPrice,
                       retail_price: retailPrice,
@@ -249,7 +275,7 @@ export function ConsignmentsSection() {
                       product_sku: prod?.sku ?? null,
                       serial_number: prod?.serial_number ?? null,
                       parent_id: prod?.parent_id ?? null,
-                      parent_name: parentName ?? null,
+                      parent_name: parentName,
                       product_type: prod?.product_type ?? null,
                       pro_price: proPrice,
                       vat_regime: prod?.vat_regime ?? null,
