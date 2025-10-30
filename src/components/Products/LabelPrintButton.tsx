@@ -31,19 +31,30 @@ function escXml(s: string) {
 
 async function dymoFetch(path: string, init?: RequestInit) {
   console.log('[DYMO] Attempting fetch to:', path);
+  const httpsUrl = `https://127.0.0.1:41951${path}`;
+  const httpUrl = `http://127.0.0.1:41951${path}`;
   try {
-    const response = await fetch(`https://127.0.0.1:41951${path}`, {
-      ...init,
-      mode: 'cors'
-    });
-    console.log('[DYMO] HTTPS request successful');
+    const response = await fetch(httpsUrl, { ...init, mode: 'cors' });
+    console.log('[DYMO] HTTPS request successful', { url: httpsUrl, status: response.status });
     return response;
-  } catch (error) {
-    console.log('[DYMO] HTTPS failed, trying HTTP fallback:', error);
-    return await fetch(`http://127.0.0.1:41951${path}`, {
-      ...init,
-      mode: 'cors'
-    });
+  } catch (errHttps: any) {
+    console.warn('[DYMO] HTTPS request failed:', errHttps?.message || errHttps);
+    try {
+      if (typeof window !== 'undefined' && window.location?.protocol === 'https:') {
+        console.warn('[DYMO] HTTP fallback may be blocked due to mixed content (site served over HTTPS).');
+      }
+      const response = await fetch(httpUrl, { ...init, mode: 'cors' });
+      console.log('[DYMO] HTTP fallback successful', { url: httpUrl, status: response.status });
+      return response;
+    } catch (errHttp: any) {
+      const hint =
+        (typeof window !== 'undefined' && window.location?.protocol === 'https:')
+          ? 'Possible mixed content blocked or untrusted localhost certificate. Try trusting https://127.0.0.1:41951 in the browser or serve app over HTTP on LAN.'
+          : 'DYMO Web Service not running or unreachable on 127.0.0.1:41951.';
+      const composed = `[DYMO] Both HTTPS (${httpsUrl}) and HTTP (${httpUrl}) attempts failed. Hint: ${hint}. HTTPS error: ${errHttps?.message || errHttps}. HTTP error: ${errHttp?.message || errHttp}.`;
+      console.error(composed);
+      throw new Error(composed);
+    }
   }
 }
 
@@ -244,6 +255,15 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
     }
 
     console.log('[DYMO] Starting print process for product:', product.id);
+
+    // Early validation: need at least serial_number or IMEI to build barcode
+    const sn = (product.serial_number || '').trim();
+    const imei = (product.imei || '').trim();
+    if (!sn && !imei) {
+      alert("Impossible d'imprimer: numéro de série/IMEI manquant sur la ligne.\nSélectionnez une ligne avec un n° de série ou IMEI.");
+      return;
+    }
+
     setBusy(true);
 
     try {
