@@ -208,6 +208,14 @@ function App() {
 
   const euro = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' });
 
+  // Normalisation unique pour détecter le régime TVA (NORMAL vs MARGE)
+  const normalizeVat = (value: any): 'MARGE' | 'NORMAL' => {
+    const v = String(value ?? '').trim().toLowerCase();
+    if (!v) return 'NORMAL';
+    if (['margin', 'marge', 'tvm'].includes(v)) return 'MARGE';
+    return 'NORMAL';
+  };
+
   const toggleSection = (id: string) => {
     setOpenSections(prev => (prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]));
   };
@@ -466,8 +474,8 @@ function App() {
                 console.log('[App] Stock', stockId, '- traitement de', details.length, 'lignes');
 
                 for (const line of details) {
-                  const vatRegime = String(line?.vat_regime || '').toUpperCase();
-                  const isMarge = vatRegime === 'MARGE';
+                  const vatRaw = (line as any)?.vat_regime ?? (line as any)?.vat_type ?? null;
+                  const isMarge = normalizeVat(vatRaw) === 'MARGE';
                   const totalLinePrice = Number(line?.total_line_price || 0);
 
                   if (totalLinePrice > 0) {
