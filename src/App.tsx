@@ -845,9 +845,12 @@ function App() {
                         aria-controls="section-consignments"
                         className="w-full flex items-center justify-between p-4 text-left font-semibold text-gray-900 hover:bg-gray-50 transition-colors cursor-pointer"
                       >
-                        <span>Suivi sous-traitant</span>
-                        <div className="flex items-center gap-4">
-                          <span className="text-xl font-bold text-blue-600">{euro.format(montantDu)}</span>
+                        <span>Sous-traitants</span>
+                        <div className="flex items-center gap-3">
+                          <div className="text-right">
+                            <div className="text-xs text-gray-600 font-normal">Total des sous-traitants (TTC normal + TVA marge)</div>
+                            <div className="text-xl font-bold text-blue-600">{euro.format(montantDu)}</div>
+                          </div>
                           <svg className={`h-5 w-5 transition-transform duration-300 ${showConsignments ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
                           </svg>
