@@ -124,16 +124,16 @@ export const handler = async (event: any) => {
     const userRole = profile?.role || 'MAGASIN';
     console.log('[consignments-list] Rôle utilisateur:', userRole);
 
-    // Contrôle d'accès RBAC
-    if (userRole === 'COMMANDE') {
-      console.log('[consignments-list] Accès refusé pour COMMANDE');
+    // Contrôle d'accès RBAC - Seuls ADMIN_FULL et ADMIN peuvent accéder
+    if (userRole !== 'ADMIN_FULL' && userRole !== 'ADMIN') {
+      console.log('[consignments-list] Accès refusé pour rôle:', userRole);
       return {
         statusCode: 403,
         headers: {
           ...corsHeaders,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ error: 'forbidden', message: 'Accès non autorisé pour ce rôle' })
+        body: JSON.stringify({ error: 'forbidden', message: 'Accès réservé aux administrateurs' })
       };
     }
 
@@ -265,10 +265,10 @@ export const handler = async (event: any) => {
         const productIds = detailResult.map((item: any) => item.product_id).filter(Boolean);
         console.log('[consignments-list] Enrichissement des produits:', productIds.length);
 
-        // Récupérer les infos produit complètes
+        // Récupérer les infos produit complètes (incluant pro_price)
         const { data: productsData, error: productsError } = await supabaseService
           .from('products')
-          .select('id, serial_number, parent_id, product_type, parent:products!parent_id(name)')
+          .select('id, serial_number, parent_id, product_type, pro_price, parent:products!parent_id(name)')
           .in('id', productIds);
 
         if (productsError) {
@@ -282,7 +282,8 @@ export const handler = async (event: any) => {
             serial_number: p.serial_number,
             parent_id: p.parent_id,
             parent_name: parentName,
-            product_type: p.product_type
+            product_type: p.product_type,
+            pro_price: p.pro_price
           });
         });
 
@@ -335,6 +336,7 @@ export const handler = async (event: any) => {
             sku: item.product_sku,
             serial: productInfo.serial_number,
             parent: productInfo.parent_name,
+            pro_price: productInfo.pro_price,
             vatRegime,
             unitPriceHT,
             unitPrice,
@@ -349,6 +351,7 @@ export const handler = async (event: any) => {
               parent_id: productInfo.parent_id || null,
               parent_name: productInfo.parent_name || null,
               product_type: productInfo.product_type || null,
+              pro_price: null,
               vat_regime: null,
               unit_price: null,
               total_line_price: null,
@@ -363,6 +366,7 @@ export const handler = async (event: any) => {
             parent_id: productInfo.parent_id || null,
             parent_name: productInfo.parent_name || null,
             product_type: productInfo.product_type || null,
+            pro_price: Number(productInfo.pro_price || 0),
             vat_regime: vatRegime || null,
             unit_price: unitPrice,
             total_line_price: totalLinePrice
@@ -377,7 +381,7 @@ export const handler = async (event: any) => {
             id,
             stock_id,
             product_id,
-            product:products(name,sku,serial_number,parent_id,product_type,parent:products!parent_id(name)),
+            product:products(name,sku,serial_number,parent_id,product_type,pro_price,parent:products!parent_id(name)),
             moves:consignment_moves(qty,type,unit_price_ht,vat_rate,vat_regime,created_at)
           `)
           .eq('stock_id', stockId);
@@ -397,6 +401,7 @@ export const handler = async (event: any) => {
             const parentId = prod?.parent_id ?? null;
             const parentName = Array.isArray(prod?.parent) ? prod.parent[0]?.name : prod?.parent?.name ?? null;
             const productType = prod?.product_type ?? null;
+            const proPrice = prod?.pro_price ?? null;
             const moves = Array.isArray(c.moves) ? c.moves : [];
 
             let qtyDepot = 0;
@@ -457,6 +462,7 @@ export const handler = async (event: any) => {
               sku: productSku,
               serial: serialNumber,
               parent: parentName,
+              pro_price: proPrice,
               vatRegime: lastVatRegime,
               unitPriceHT: lastUnitPriceHT,
               unitPrice,
@@ -474,6 +480,7 @@ export const handler = async (event: any) => {
               parent_id: parentId,
               parent_name: parentName,
               product_type: productType,
+              pro_price: proPrice,
               vat_regime: lastVatRegime,
               unit_price: unitPrice,
               total_line_price: totalLinePrice,
@@ -501,6 +508,7 @@ export const handler = async (event: any) => {
             if (!canViewVAT) {
               return {
                 ...item,
+                pro_price: null,
                 vat_regime: null,
                 unit_price: null,
                 total_line_price: null,
