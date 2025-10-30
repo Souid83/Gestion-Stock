@@ -52,7 +52,7 @@ function App() {
   const [showToolsMenu, setShowToolsMenu] = useState(false);
   const [showWorkshopMenu, setShowWorkshopMenu] = useState(false);
   const [isQuickCalcOpen, setIsQuickCalcOpen] = useState(false);
-  const [openSections, setOpenSections] = useState<string[]>(['commandes', 'ventes']);
+  const [openSections, setOpenSections] = useState<string[]>([]);
   const [showConsignments, setShowConsignments] = useState(false);
   const [period, setPeriod] = useState<'jour' | 'semaine' | 'mois' | 'personnalise'>('semaine');
   const [startDate, setStartDate] = useState<string>('');
@@ -506,7 +506,7 @@ function App() {
   }
 
   const renderContent = () => {
-    const content = (() => {
+    const content: React.ReactNode = (() => {
       switch (currentPage) {
         case 'select-type':
           return isAdminUser ? <ProductTypeSelection /> : <div className="p-6">Accès non autorisé</div>;
@@ -848,8 +848,8 @@ function App() {
                         <span>Suivi sous-traitant</span>
                         <div className="flex items-center gap-4">
                           <span className="text-xl font-bold text-blue-600">{euro.format(montantDu)}</span>
-                          <svg className={`h-5 w-5 transition-transform duration-300 ${showConsignments ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                          <svg className={`h-5 w-5 transition-transform duration-300 ${showConsignments ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
                           </svg>
                         </div>
                       </button>
