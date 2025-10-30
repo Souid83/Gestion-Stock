@@ -533,7 +533,7 @@ export const Products = () => {
           const mirrorParentIds = Array.from(
             new Set(((mirrorRows as any[]) || []).map((r: any) => r?.parent_id).filter(Boolean))
           );
-          if (mirrorParentIds.length >= 0) {
+          if (mirrorParentIds.length > 0) {
             idConstraint = intersectIds(idConstraint, mirrorParentIds);
           }
         } catch (e) {
@@ -1093,6 +1093,11 @@ export const Products = () => {
     window.addEventListener('products:global-search', onGlobalSearch as any);
     return () => window.removeEventListener('products:global-search', onGlobalSearch as any);
   }, [applyFilters]);
+
+  // Relancer la recherche dès que la valeur restaurée/éditée change
+  useEffect(() => {
+    applyFilters(currentSearchQuery);
+  }, [currentSearchQuery]);
 
   // Appliquer les filtres automatiquement quand ils changent
   useEffect(() => {
