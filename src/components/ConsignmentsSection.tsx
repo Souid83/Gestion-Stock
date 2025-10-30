@@ -58,6 +58,15 @@ export function ConsignmentsSection() {
     []
   );
 
+  // Normalise un libellé de TVA en "MARGE" ou "NORMAL"
+  const normalizeVat = (value: any): string => {
+    const v = String(value ?? '').trim().toLowerCase();
+    if (!v) return 'NORMAL';
+    if (['margin', 'marge', 'tvm'].includes(v)) return 'MARGE';
+    // Tout le reste est considéré comme régime normal (TTC)
+    return 'NORMAL';
+  };
+
   // Récupérer rôle utilisateur (profil)
   useEffect(() => {
     let cancelled = false;
@@ -214,7 +223,7 @@ export function ConsignmentsSection() {
                 // Étape 1: Récupérer les produits depuis stock_produit (sans jointure parent)
                 const { data: spRows, error: spErr } = await supabase
                   .from('stock_produit')
-                  .select('produit_id, quantite, products(name, sku, serial_number, parent_id, product_type, pro_price, vat_regime, retail_price)')
+                  .select('produit_id, quantite, products(name, sku, serial_number, parent_id, product_type, pro_price, vat_regime, vat_type, retail_price)')
                   .eq('stock_id', s.stock_id)
                   .gt('quantite', 0);
 
@@ -278,7 +287,7 @@ export function ConsignmentsSection() {
                       parent_name: parentName,
                       product_type: prod?.product_type ?? null,
                       pro_price: proPrice,
-                      vat_regime: prod?.vat_regime ?? null,
+                      vat_regime: normalizeVat(prod?.vat_regime ?? prod?.vat_type ?? null),
                       unit_price: unitPrice,
                       total_line_price: totalLinePrice,
                       qty_en_depot: qty,
@@ -330,16 +339,18 @@ export function ConsignmentsSection() {
     let ttcMarge = 0;    // Total TTC pour TVA marge
 
     for (const r of rows || []) {
-      // Déterminer le régime de TVA - source de vérité
-      const vatRegime = String(r?.vat_regime || '').toUpperCase();
-      const isMarge = vatRegime === 'MARGE';
+      // Déterminer le régime de TVA - source de vérité (normalise vat_type/vat_regime)
+      const vatRaw = (r as any)?.vat_regime ?? (r as any)?.vat_type ?? null;
+      const isMarge = normalizeVat(vatRaw) === 'MARGE';
 
       // Récupérer le prix total de la ligne (déjà calculé par l'API ou le fallback)
       const totalLinePrice = Number(r?.total_line_price || 0);
 
+      const vatNorm = normalizeVat(vatRaw);
       console.log('[ConsignmentsSection] Ligne traitement:', {
         sku: r?.product_sku,
-        vat_regime: vatRegime,
+        vat_raw: vatRaw,
+        vat_norm: vatNorm,
         isMarge,
         total_line_price: totalLinePrice
       });
@@ -524,9 +535,9 @@ export function ConsignmentsSection() {
                       const unitPrice = Number(d?.unit_price || 0);
                       const totalLinePrice = Number(d?.total_line_price || 0);
 
-                      // Déterminer le badge TVA compact
-                      const vatRegime = String(d?.vat_regime || '').toUpperCase();
-                      const isMarge = vatRegime === 'MARGE';
+                      // Déterminer le badge TVA compact (normalisation vat_type/vat_regime)
+                      const vatRaw = (d as any)?.vat_regime ?? (d as any)?.vat_type ?? null;
+                      const isMarge = normalizeVat(vatRaw) === 'MARGE';
                       const badgeText = isMarge ? 'TVM' : 'TTC';
                       const badgeClass = isMarge ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800';
 
@@ -548,7 +559,7 @@ export function ConsignmentsSection() {
                           <td className="py-1.5 pr-2 text-gray-900">{d.product_sku || ''}</td>
                           <td className="py-1.5 px-2 text-gray-900">{displayName}</td>
                           <td className="py-1.5 px-2 text-center">
-                            {canViewVAT && d.vat_regime ? (
+                            {canViewVAT && ((d as any).vat_regime || (d as any).vat_type) ? (
                               <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-semibold ${badgeClass}`}>
                                 {badgeText}
                               </span>
@@ -560,7 +571,7 @@ export function ConsignmentsSection() {
                           <td className="py-1.5 px-2 text-gray-900">{qty}</td>
                           <td className="py-1.5 px-2 text-right text-gray-900">
                             {canViewVAT ? formatMoney(unitPrice) : '—'}
-                            {canViewVAT && d.vat_regime && (
+                            {canViewVAT && ((d as any).vat_regime || (d as any).vat_type) && (
                               <span className="text-xs text-gray-500 ml-1">
                                 {isMarge ? '(TTC)' : '(HT)'}
                               </span>
@@ -569,7 +580,7 @@ export function ConsignmentsSection() {
                           <td className="py-1.5 px-2 text-right text-gray-900 font-medium">
                             <div className="inline-flex items-center justify-end gap-2 w-full">
                               <span>{canViewVAT ? formatMoney(totalLinePrice) : '—'}</span>
-                              {canViewVAT && d.vat_regime ? (
+                              {canViewVAT && ((d as any).vat_regime || (d as any).vat_type) ? (
                                 <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-semibold ${badgeClass}`}>
                                   {badgeText}
                                 </span>
