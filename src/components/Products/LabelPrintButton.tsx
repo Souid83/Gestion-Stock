@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { jsPDF } from 'jspdf';
 
 type PamProduct = {
   id: string;
@@ -270,10 +271,115 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
     }
   }
 
+  // Nouvelle implémentation 100% PDF côté client (sans DYMO ni appels réseau)
+  async function onPrintPDF() {
+    if (busy) return;
+
+    const serial = (product.serial_number || product.imei || '').trim();
+    if (!serial) {
+      alert('Aucune étiquette à générer');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      // Page étiquette 62×100 mm (DYMO) en mm
+      const doc = new jsPDF({ unit: 'mm', format: [62, 100], orientation: 'portrait' });
+
+      // Données
+      const sku = (((product as any)?.sku) || product.id || '').toString().toUpperCase();
+      const name = (product.name || '').toString();
+      const qty = 1;
+      const unit = Number((product.retail_price ?? product.pro_price) || 0);
+      const total = unit * qty;
+
+      // Bordure/encadré
+      doc.setDrawColor(0);
+      doc.setLineWidth(0.4);
+      doc.rect(3, 3, 56, 94);
+
+      // En-têtes
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.text('Étiquette produit', 31, 9, { align: 'center' });
+
+      // Bloc infos texte
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      const lineX = 6;
+      let y = 16;
+
+      doc.text(`SKU: ${sku || '—'}`, lineX, y); y += 5;
+      doc.text(`Nom: ${name.slice(0, 40)}`, lineX, y); y += 5;
+      doc.text(`N° série: ${serial}`, lineX, y); y += 5;
+      doc.text(`Qté: ${qty}`, lineX, y); y += 5;
+      doc.text(`PU: ${euro(unit)}`, lineX, y); y += 5;
+      doc.setFont('helvetica', 'bold');
+      doc.text(`Total: ${euro(total)}`, lineX, y); y += 6;
+
+      // “Pseudo” code (grille binaire) à partir du numéro de série (sans dépendance externe)
+      // Ce n'est pas un QR scannable, mais donne un rendu visuel compact.
+      const gridSize = 16;
+      const cell = 2.5; // mm
+      const startX = 6;
+      const startY = 50;
+      // Petit hash déterministe
+      let h = 0;
+      for (let i = 0; i < serial.length; i++) {
+        h = (h * 33 + serial.charCodeAt(i)) >>> 0;
+      }
+      doc.setDrawColor(0);
+      for (let r = 0; r < gridSize; r++) {
+        for (let c = 0; c < gridSize; c++) {
+          // Décider de remplir la case selon un bit du hash “mixé”
+          const bit = ((h >> ((r + c) % 31)) ^ ((r * 17 + c * 13) & 1)) & 1;
+          if (bit) {
+            doc.setFillColor(0, 0, 0);
+            doc.rect(startX + c * cell, startY + r * cell, cell - 0.2, cell - 0.2, 'F');
+          }
+        }
+      }
+      // Légende sous la grille
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7);
+      doc.text(`SN: ${serial}`, startX, startY + gridSize * cell + 4);
+
+      // Ouvrir dans un nouvel onglet et proposer d'imprimer
+      const url = doc.output('bloburl');
+      const w = window.open(url, '_blank');
+
+      if (w) {
+        setTimeout(() => {
+          const go = window.confirm('Souhaitez-vous imprimer toutes les étiquettes maintenant ?');
+          if (go) {
+            try {
+              w.focus();
+              // Certains navigateurs ne déclenchent l’impression qu’une fois le PDF chargé
+              setTimeout(() => {
+                try { (w as any).print?.(); } catch {}
+              }, 400);
+            } catch {
+              // Fallback téléchargement si impression indisponible
+              doc.save('etiquettes.pdf');
+            }
+          }
+        }, 500);
+      } else {
+        // Popup bloquée → téléchargement direct
+        doc.save('etiquettes.pdf');
+      }
+    } catch (e) {
+      console.error('[PDF] Erreur génération étiquette:', e);
+      alert("Erreur lors de la génération du PDF d'étiquettes.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <button
       type="button"
-      onClick={onPrint}
+      onClick={onPrintPDF}
       title="Imprimer l'étiquette (57×32 mm)"
       disabled={busy}
       className="inline-flex items-center gap-1 mt-1 text-xs text-blue-600 hover:text-blue-800 disabled:opacity-50 disabled:cursor-not-allowed"
