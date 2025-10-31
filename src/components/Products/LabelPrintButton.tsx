@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { jsPDF } from 'jspdf';
+import { supabase } from '../../lib/supabase';
 
 type PamProduct = {
   id: string;
@@ -29,6 +30,45 @@ function prixInt(v?: number | null) {
     maximumFractionDigits: 0,
     minimumFractionDigits: 0
   }).format(Math.round(v));
+}
+
+// Normalise la valeur stockée en BD vers l'étiquette 'TVM' ou 'TTC'
+function computeVatLabel(raw?: string | null): 'TVM' | 'TTC' {
+  const v = (raw ?? '').toString().trim().toLowerCase();
+  if (['margin', 'tvm', 'marge', 'margin_scheme', 'margin-based', 'mrgn'].includes(v)) return 'TVM';
+  if (['normal', 'ttc', 'standard', 'std'].includes(v)) return 'TTC';
+  // Valeur inattendue: par défaut TTC (régime normal)
+  return 'TTC';
+}
+
+// Récupère le vat_type au niveau "série" (ligne produit portant serial_number/IMEI)
+async function getSerialVatType(product: PamProduct): Promise<string | null> {
+  const bySerial = (product.serial_number || '').trim();
+  const byImei = (product.imei || '').trim();
+
+  // Si le composant reçoit déjà la bonne ligne "série" avec vat_type, on peut la renvoyer telle quelle
+  if (product.vat_type && (bySerial || byImei)) {
+    // On vérifie tout de même via BD si nécessaire; on peut court-circuiter si vous préférez éviter la requête
+    // return product.vat_type;
+  }
+
+  // Requête prioritaire par serial_number, sinon par imei
+  let query = supabase.from('products').select('vat_type').limit(1);
+  if (bySerial) {
+    query = query.eq('serial_number', bySerial);
+  } else if (byImei) {
+    query = query.eq('imei', byImei);
+  } else {
+    // Pas d'identifiant série: fallback au champ fourni
+    return product.vat_type ?? null;
+  }
+
+  const { data, error } = await query.maybeSingle();
+  if (error) {
+    console.warn('[LabelPrint] getSerialVatType: fallback (error)', error);
+    return product.vat_type ?? null;
+  }
+  return (data as any)?.vat_type ?? product.vat_type ?? null;
 }
 
 /**
@@ -121,6 +161,10 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
       const m = 2.0, innerW = W - m*2;
       const xL = m, xR = m + innerW;
 
+      // Résolution du régime TVA au niveau série
+      const vatRaw = await getSerialVatType(product);
+      const vat = computeVatLabel(vatRaw);
+
       // cadre
       doc.setDrawColor(0); doc.setLineWidth(0.3);
       doc.roundedRect(m, m, innerW, H - m*2, 1.2, 1.2);
@@ -130,7 +174,6 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
       doc.setDrawColor(0); doc.setFillColor(0); doc.rect(qrX, qrY, qrSize, qrSize, 'S');
 
       // BARCODE — top row, full width to the right of QR, half height
-      const vat = product.vat_type === 'margin' ? 'TVM' : 'TTC';
       const quiet = 2.0, gap = 2.0, bcH = 5.2, bcTopY = qrY;
       const bcX = qrX + qrSize + gap;
       const bcW = (xR - 1.2) - bcX;
@@ -139,12 +182,12 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
 
       doc.setFont('courier','bold'); doc.setFontSize(7.4);
       const serialTextY = bcTopY + bcH + 3.0;
-      doc.text(`${serial}  ${vat}`, bcX + bcW - quiet, serialTextY, { align: 'right' } as any);
+      (doc as any).text(`${serial}  ${vat}`, bcX + bcW - quiet, serialTextY, { align: 'right' });
 
       // PV/PVP (sans € et sans décimales)
       doc.setFont('helvetica','normal'); doc.setFontSize(6.0);
-      doc.text(`PV:  ${prixInt(product.retail_price)}`,  qrX, qrY + qrSize + 2.4, { align: 'left' } as any);
-      doc.text(`PVP: ${prixInt(product.pro_price)}`, qrX, qrY + qrSize + 5.2, { align: 'left' } as any);
+      (doc as any).text(`PV:  ${prixInt(product.retail_price)}`,  qrX, qrY + qrSize + 2.4, { align: 'left' });
+      (doc as any).text(`PVP: ${prixInt(product.pro_price)}`, qrX, qrY + qrSize + 5.2, { align: 'left' });
 
       // Nom produit colonne à droite du QR, début sous le QR et sous série+TVA
       const gapRightOfQR = 2.0;
@@ -153,18 +196,18 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
       const name = String(product.name || '').toUpperCase();
       const lines = doc.splitTextToSize(String(name), Number(txW)) as string[];
       let yText = Math.max(qrY + qrSize + 2.0, serialTextY + 2.8);
-      (lines.slice(0,3)).forEach(ln => { doc.text(ln, txL, yText); yText += 2.7; });
+      (lines.slice(0,3)).forEach(ln => { (doc as any).text(String(ln), txL, yText); yText += 2.7; });
 
       // BAT centré sous le nom, même taille, avec butée avant notes
       if (typeof product.battery_level === 'number') {
         doc.setFont('helvetica','bold'); doc.setFontSize(6.0);
         const batX = (txL + txR) / 2;
-        const padFromText = 2.6;
-        const safePadToNotes = 2.0;
+        const padFromText = 5.0;
+        const safePadToNotes = 0.5;
         const notesTopYSafe = H - m - 8.8;
         let batY = yText + padFromText;
         batY = Math.min(batY, notesTopYSafe - safePadToNotes);
-        doc.text(`BAT: ${Math.round(product.battery_level)}%`, batX, batY, { align: 'center' } as any);
+        (doc as any).text(`BAT: ${Math.round(product.battery_level)}%`, batX, batY, { align: 'center' });
         yText = batY;
       }
 
@@ -180,7 +223,7 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
       const avail = (H - m) - (notesTopY + topPad);
       const maxLines = Math.max(1, Math.floor(avail / lineH));
       const notes = rawNotes.slice(0, maxLines);
-      let ny = notesTopY + topPad; notes.forEach(ln => { doc.text(ln, m + 1.2, ny); ny += lineH; });
+      let ny = notesTopY + topPad; notes.forEach(ln => { (doc as any).text(String(ln), m + 1.2, ny); ny += lineH; });
 
       // Ouvrir dans un onglet et proposer impression
       const url = doc.output('bloburl');
