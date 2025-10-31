@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { jsPDF } from 'jspdf';
 import { supabase } from '../../lib/supabase';
+import * as QRCode from 'qrcode';
 
 type PamProduct = {
   id: string;
@@ -121,21 +122,6 @@ function drawCode39(doc: jsPDF, x: number, y: number, w: number, h: number, valu
   }
 }
 
-/** Minimal deterministic matrix as placeholder (not a true QR) */
-function drawPseudoMatrix(doc: jsPDF, x: number, y: number, size: number, seed: string) {
-  const grid = 21;
-  const cell = size / grid;
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < seed.length; i++) h = (h ^ seed.charCodeAt(i)) * 16777619 >>> 0;
-  for (let r = 0; r < grid; r++) {
-    for (let c = 0; c < grid; c++) {
-      const bit = ((h >> ((r * 3 + c) % 31)) ^ ((r + c) & 1)) & 1;
-      if (bit) {
-        doc.rect(x + c * cell, y + r * cell, cell * 0.95, cell * 0.95, 'F');
-      }
-    }
-  }
-}
 
 
 export default function LabelPrintButton({ product }: { product: PamProduct }) {
@@ -169,9 +155,11 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
       doc.setDrawColor(0); doc.setLineWidth(0.3);
       doc.roundedRect(m, m, innerW, H - m*2, 1.2, 1.2);
 
-      // QR (placeholder simple — carré) — top-left
+      // QR (vrai QR avec deeplink gestock://product/{serial})
       const qrSize = 10.5, qrX = m + 1.2, qrY = m + 1.1;
-      doc.setDrawColor(0); doc.setFillColor(0); doc.rect(qrX, qrY, qrSize, qrSize, 'S');
+      const deeplink = `gestock://product/${serial}`;
+      const qrDataUrl = await QRCode.toDataURL(deeplink, { errorCorrectionLevel: 'M', margin: 0, scale: 8 });
+      doc.addImage(qrDataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
 
       // BARCODE — top row, full width to the right of QR, half height
       const quiet = 2.0, gap = 2.0, bcH = 5.2, bcTopY = qrY;
