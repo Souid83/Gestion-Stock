@@ -43,6 +43,7 @@ import { SalesChart } from './components/Dashboard/SalesChart';
 import { ConsignmentsSection } from './components/ConsignmentsSection';
 import { Consignments } from './pages/consignments';
 import Login from './pages/Login';
+import MobileActions from './pages/MobileActions';
 
 function App() {
   const { metrics, isLoading, error, fetchMetrics } = useSalesStore();
@@ -108,7 +109,7 @@ function App() {
       'customers','consignments',
       // Settings / tools / marketplace
       'mail-settings','invoice-settings','settings-ebay','settings-users',
-      'marketplace-pricing','repair-calculator','atelier-prise-en-charge'
+      'marketplace-pricing','repair-calculator','atelier-prise-en-charge','mobile-actions'
     ]);
 
     const mapPathToPage = (pathname: string): string | null => {
@@ -636,6 +637,8 @@ function App() {
         // Ajout de la route pour la gestion des clients
         case 'customers':
           return <Customers />;
+        case 'mobile-actions':
+          return <MobileActions />;
         case 'consignments':
           return can('viewConsignments', userRole) ? <Consignments /> : <div className="p-6 text-red-600">Accès non autorisé</div>;
         case 'repair-calculator':
