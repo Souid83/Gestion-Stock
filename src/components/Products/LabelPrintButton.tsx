@@ -22,6 +22,15 @@ function euro(v?: number | null) {
   }).format(v);
 }
 
+// Prix sans symbole € et sans décimales
+function prixInt(v?: number | null) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  return new Intl.NumberFormat('fr-FR', {
+    maximumFractionDigits: 0,
+    minimumFractionDigits: 0
+  }).format(Math.round(v));
+}
+
 /**
  * Code39 patterns (n = narrow, w = wide) for supported characters
  * Bars and spaces alternate, pattern starts with a bar element
@@ -88,33 +97,6 @@ function drawPseudoMatrix(doc: jsPDF, x: number, y: number, size: number, seed: 
   }
 }
 
-/** Wrap uppercased text with left alignment */
-function wrapUpperLeft(
-  doc: jsPDF,
-  text: string,
-  x: number,
-  y: number,
-  maxWidth: number,
-  lineH: number,
-  maxLines: number
-) {
-  const words = (text || '').toUpperCase().split(/\s+/);
-  let line = '';
-  const lines: string[] = [];
-  for (const w of words) {
-    const test = line ? `${line} ${w}` : w;
-    if (doc.getTextWidth(test) <= maxWidth) {
-      line = test;
-    } else {
-      if (line) lines.push(line);
-      line = w;
-      if (lines.length >= maxLines - 1) break;
-    }
-  }
-  if (line && lines.length < maxLines) lines.push(line);
-  lines.forEach((ln, i) => doc.text(ln, x, y + i * lineH, { align: 'left', maxWidth }));
-  return y + (lines.length * lineH);
-}
 
 export default function LabelPrintButton({ product }: { product: PamProduct }) {
   const [busy, setBusy] = useState(false);
@@ -131,10 +113,11 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
 
     setBusy(true);
     try {
-      // Crée un document PDF 57x32 mm
-      const doc = new jsPDF({ unit: 'mm', format: [57, 32], orientation: 'portrait' });
+      // Crée un document PDF 57x32 mm (même mise en forme que pdf.html)
+      const doc = new jsPDF({ unit: 'mm', orientation: 'landscape', format: [32, 57] });
       // === Layout constants ===
-      const W = 57, H = 32;
+      const W = doc.internal.pageSize.getWidth();
+      const H = doc.internal.pageSize.getHeight();
       const m = 2.0, innerW = W - m*2;
       const xL = m, xR = m + innerW;
 
@@ -142,60 +125,62 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
       doc.setDrawColor(0); doc.setLineWidth(0.3);
       doc.roundedRect(m, m, innerW, H - m*2, 1.2, 1.2);
 
-      // --- BARCODE on top ---
-      const vat = product.vat_type === "margin" ? "TVM" : "TTC";
-      const bcX = m + 1.2;
-      const bcW = innerW - 2.4;
-      const bcH = 9.5;                 // plus haut
-      const quiet = 0.8;               // quiet zones latérales
+      // QR (placeholder simple — carré) — top-left
+      const qrSize = 10.5, qrX = m + 1.2, qrY = m + 1.1;
+      doc.setDrawColor(0); doc.setFillColor(0); doc.rect(qrX, qrY, qrSize, qrSize, 'S');
+
+      // BARCODE — top row, full width to the right of QR, half height
+      const vat = product.vat_type === 'margin' ? 'TVM' : 'TTC';
+      const quiet = 2.0, gap = 2.0, bcH = 5.2, bcTopY = qrY;
+      const bcX = qrX + qrSize + gap;
+      const bcW = (xR - 1.2) - bcX;
       doc.setFillColor(0,0,0);
-      drawCode39(doc, bcX + quiet, m + 1.1, bcW - quiet*2, bcH, serial);
+      drawCode39(doc, bcX + quiet, bcTopY, bcW - quiet * 2, bcH, serial);
 
-      // texte lisible sous le code-barres (mono, aligné à gauche)
-      doc.setFont("courier", "bold"); doc.setFontSize(7.2);
-      doc.text(`${serial}  ${vat}`, bcX, m + 1.1 + bcH + 3.0, { align: "left" });
+      doc.setFont('courier','bold'); doc.setFontSize(7.4);
+      const serialTextY = bcTopY + bcH + 3.0;
+      doc.text(`${serial}  ${vat}`, bcX + bcW - quiet, serialTextY, { align: 'right' } as any);
 
-      // --- QR + PV/PVP à gauche ---
-      const qrSize = 10.5;
-      const qrX = m + 1.2;
-      const qrY = m + 1.1 + bcH + 5.0;
-      doc.setFillColor(0,0,0);
-      drawPseudoMatrix(doc, qrX, qrY, qrSize, `/?page=mobile-actions&id=${product.id}`);
+      // PV/PVP (sans € et sans décimales)
+      doc.setFont('helvetica','normal'); doc.setFontSize(6.0);
+      doc.text(`PV:  ${prixInt(product.retail_price)}`,  qrX, qrY + qrSize + 2.4, { align: 'left' } as any);
+      doc.text(`PVP: ${prixInt(product.pro_price)}`, qrX, qrY + qrSize + 5.2, { align: 'left' } as any);
 
-      doc.setFont("helvetica", "normal"); doc.setFontSize(7.0);
-      const pv = euro(product.retail_price);
-      const pvp = euro(product.pro_price);
-      doc.text(`PV:  ${pv}`, qrX, qrY + qrSize + 2.4, { align: "left" });
-      doc.text(`PVP: ${pvp}`, qrX, qrY + qrSize + 5.2, { align: "left" });
+      // Nom produit colonne à droite du QR, début sous le QR et sous série+TVA
+      const gapRightOfQR = 2.0;
+      const txL = qrX + qrSize + gapRightOfQR, txR = xR - 1.4, txW = txR - txL;
+      doc.setFont('helvetica','bold'); doc.setFontSize(6.0);
+      const name = String(product.name || '').toUpperCase();
+      const lines = doc.splitTextToSize(String(name), Number(txW)) as string[];
+      let yText = Math.max(qrY + qrSize + 2.0, serialTextY + 2.8);
+      (lines.slice(0,3)).forEach(ln => { doc.text(ln, txL, yText); yText += 2.7; });
 
-      // --- Bloc titre à droite du QR ---
-      const txL = qrX + qrSize + 2.0;
-      const txW = xR - 1.4 - txL;
-      doc.setFont("helvetica", "bold"); doc.setFontSize(8.8);
-      const name = (product.name || "").toUpperCase();
-      const lines = doc.splitTextToSize(name, txW);
-      const maxLines = 3;
-      const used = (Array.isArray(lines) ? lines : [String(lines)]).slice(0, maxLines);
-      let yText = qrY + 1.8;
-      used.forEach((ln: string) => { doc.text(ln, txL, yText); yText += 3.4; });
-
-      // BAT à droite du bloc titre
-      if (typeof product.battery_level === "number") {
-        doc.setFont("helvetica", "bold"); doc.setFontSize(8.0);
-        doc.text(`BAT: ${Math.round(product.battery_level)}%`, xR - 1.4, yText, { align: "right" });
+      // BAT centré sous le nom, même taille, avec butée avant notes
+      if (typeof product.battery_level === 'number') {
+        doc.setFont('helvetica','bold'); doc.setFontSize(6.0);
+        const batX = (txL + txR) / 2;
+        const padFromText = 2.6;
+        const safePadToNotes = 2.0;
+        const notesTopYSafe = H - m - 8.8;
+        let batY = yText + padFromText;
+        batY = Math.min(batY, notesTopYSafe - safePadToNotes);
+        doc.text(`BAT: ${Math.round(product.battery_level)}%`, batX, batY, { align: 'center' } as any);
+        yText = batY;
       }
 
-      // --- Notes en bas ---
-      const notesTopY = H - m - 8.4;
-      doc.setLineWidth(0.2);
-      doc.line(m + 1.0, notesTopY, xR - 1.0, notesTopY);
+      // Notes remontées + enveloppe dynamique
+      const notesTopY = H - m - 8.8;
+      doc.setLineWidth(0.2); doc.line(m + 1.0, notesTopY, xR - 1.0, notesTopY);
 
-      doc.setFont("helvetica", "normal"); doc.setFontSize(6.0);
-      const noteRaw = (product.product_note || "").replace(/\r?\n/g, " ").toUpperCase();
-      const noteLines = doc.splitTextToSize(noteRaw, innerW - 2.4) as string[];
-      const noteUsed = (Array.isArray(noteLines) ? noteLines : [String(noteLines)]).slice(0, 3);
-      let ny = notesTopY + 2.6;
-      noteUsed.forEach((ln: string) => { doc.text(ln, m + 1.2, ny); ny += 2.8; });
+      doc.setFont('helvetica','normal'); doc.setFontSize(6.0);
+      const textNotes = String((product.product_note || '').replace(/\r?\n/g, ' ')).toUpperCase();
+      const rawNotes = doc.splitTextToSize(textNotes, innerW - 2.4) as string[];
+      const lineH = 2.8;
+      const topPad = 2.0;
+      const avail = (H - m) - (notesTopY + topPad);
+      const maxLines = Math.max(1, Math.floor(avail / lineH));
+      const notes = rawNotes.slice(0, maxLines);
+      let ny = notesTopY + topPad; notes.forEach(ln => { doc.text(ln, m + 1.2, ny); ny += lineH; });
 
       // Ouvrir dans un onglet et proposer impression
       const url = doc.output('bloburl');
