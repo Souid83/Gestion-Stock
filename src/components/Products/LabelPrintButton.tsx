@@ -131,76 +131,71 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
 
     setBusy(true);
     try {
-      // Étiquette 57×32 mm
+      // Crée un document PDF 57x32 mm
       const doc = new jsPDF({ unit: 'mm', format: [57, 32], orientation: 'portrait' });
+      // === Layout constants ===
+      const W = 57, H = 32;
+      const m = 2.0, innerW = W - m*2;
+      const xL = m, xR = m + innerW;
 
-      // Paramètres de mise en page
-      const margin = 2.0;
-      const innerW = 57 - margin * 2;
+      // cadre
+      doc.setDrawColor(0); doc.setLineWidth(0.3);
+      doc.roundedRect(m, m, innerW, H - m*2, 1.2, 1.2);
 
-      // Encadré arrondi léger
-      doc.setDrawColor(0);
-      doc.setLineWidth(0.3);
-      doc.roundedRect(margin, margin, innerW, 32 - margin * 2, 1.2, 1.2);
+      // --- BARCODE on top ---
+      const vat = product.vat_type === "margin" ? "TVM" : "TTC";
+      const bcX = m + 1.2;
+      const bcW = innerW - 2.4;
+      const bcH = 9.5;                 // plus haut
+      const quiet = 0.8;               // quiet zones latérales
+      doc.setFillColor(0,0,0);
+      drawCode39(doc, bcX + quiet, m + 1.1, bcW - quiet*2, bcH, serial);
 
-      // Code-barres (largeur utile), hauteur légèrement augmentée
-      const barcodeX = margin + 1.6;
-      const barcodeW = innerW - 3.2;
-      const barcodeH = 6.8;
-      doc.setFillColor(0, 0, 0);
-      drawCode39(doc, barcodeX, margin + 1.2, barcodeW, barcodeH, serial);
+      // texte lisible sous le code-barres (mono, aligné à gauche)
+      doc.setFont("courier", "bold"); doc.setFontSize(7.2);
+      doc.text(`${serial}  ${vat}`, bcX, m + 1.1 + bcH + 3.0, { align: "left" });
 
-      // Ligne numéro + type TVA juste en dessous, centré
-      const vatLabel = (product.vat_type === 'margin') ? 'TVM' : 'TTC';
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(7.2);
-      doc.text(`${serial} • ${vatLabel}`, margin + innerW / 2, margin + 1.2 + barcodeH + 3.0, { align: 'center' });
-
-      // QR en haut-gauche
-      const qrSize = 12.8;
-      const qrX = margin + 1.4;
-      const qrY = margin + 1.2 + barcodeH + 4.2;
-      doc.setFillColor(0, 0, 0);
+      // --- QR + PV/PVP à gauche ---
+      const qrSize = 10.5;
+      const qrX = m + 1.2;
+      const qrY = m + 1.1 + bcH + 5.0;
+      doc.setFillColor(0,0,0);
       drawPseudoMatrix(doc, qrX, qrY, qrSize, `/?page=mobile-actions&id=${product.id}`);
 
-      // PV / PVP sous le QR (petit)
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(6.3);
-      const pv = euro(product.retail_price ?? null);
-      const pvp = euro(product.pro_price ?? null);
-      const pvY = qrY + qrSize + 2.0;
-      doc.text(`PV: ${pv}`, qrX, pvY);
-      doc.text(`PVP: ${pvp}`, qrX, pvY + 3.0);
+      doc.setFont("helvetica", "normal"); doc.setFontSize(7.0);
+      const pv = euro(product.retail_price);
+      const pvp = euro(product.pro_price);
+      doc.text(`PV:  ${pv}`, qrX, qrY + qrSize + 2.4, { align: "left" });
+      doc.text(`PVP: ${pvp}`, qrX, qrY + qrSize + 5.2, { align: "left" });
 
-      // Bloc texte à droite du QR — nom produit (MAJ, aligné gauche)
-      const textLeft = qrX + qrSize + 2.2;
-      const textRight = margin + innerW - 1.2;
-      const textWidth = textRight - textLeft;
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(7.2);
-      const startTextY = qrY + 2.0;
-      const afterNameY = wrapUpperLeft(doc, (product.name || ''), textLeft, startTextY, textWidth, 3.2, 2);
+      // --- Bloc titre à droite du QR ---
+      const txL = qrX + qrSize + 2.0;
+      const txW = xR - 1.4 - txL;
+      doc.setFont("helvetica", "bold"); doc.setFontSize(8.8);
+      const name = (product.name || "").toUpperCase();
+      const lines = doc.splitTextToSize(name, txW);
+      const maxLines = 3;
+      const used = (Array.isArray(lines) ? lines : [String(lines)]).slice(0, maxLines);
+      let yText = qrY + 1.8;
+      used.forEach((ln: string) => { doc.text(ln, txL, yText); yText += 3.4; });
 
-      // BAT (facultatif) — aligné à droite du bloc
-      if (typeof product.battery_level === 'number') {
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(7.0);
-        doc.text(`BAT: ${Math.round(product.battery_level)}%`, textRight, afterNameY + 3.2, { align: 'right' });
+      // BAT à droite du bloc titre
+      if (typeof product.battery_level === "number") {
+        doc.setFont("helvetica", "bold"); doc.setFontSize(8.0);
+        doc.text(`BAT: ${Math.round(product.battery_level)}%`, xR - 1.4, yText, { align: "right" });
       }
 
-      // Filet + notes (petit) en bas
-      const notesTopY = 32 - margin - 8.0;
+      // --- Notes en bas ---
+      const notesTopY = H - m - 8.4;
       doc.setLineWidth(0.2);
-      doc.line(margin + 1.0, notesTopY, margin + innerW - 1.0, notesTopY);
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(6.0);
-      const note = (product.product_note || '').replace(/\r?\n/g, ' ');
-      // Wrap simple en deux lignes (compact)
-      const maxChars = 52;
-      const n1 = note.slice(0, maxChars);
-      const n2 = note.slice(maxChars, maxChars * 2);
-      if (n1) doc.text(n1.toUpperCase(), margin + 1.2, notesTopY + 2.8, { maxWidth: innerW - 2.4 });
-      if (n2) doc.text(n2.toUpperCase(), margin + 1.2, notesTopY + 5.6, { maxWidth: innerW - 2.4 });
+      doc.line(m + 1.0, notesTopY, xR - 1.0, notesTopY);
+
+      doc.setFont("helvetica", "normal"); doc.setFontSize(6.0);
+      const noteRaw = (product.product_note || "").replace(/\r?\n/g, " ").toUpperCase();
+      const noteLines = doc.splitTextToSize(noteRaw, innerW - 2.4) as string[];
+      const noteUsed = (Array.isArray(noteLines) ? noteLines : [String(noteLines)]).slice(0, 3);
+      let ny = notesTopY + 2.6;
+      noteUsed.forEach((ln: string) => { doc.text(ln, m + 1.2, ny); ny += 2.8; });
 
       // Ouvrir dans un onglet et proposer impression
       const url = doc.output('bloburl');
