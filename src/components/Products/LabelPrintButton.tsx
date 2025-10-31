@@ -10,6 +10,7 @@ type PamProduct = {
   product_note?: string | null;
   retail_price?: number | null;
   pro_price?: number | null;
+  vat_type?: 'normal' | 'margin' | string | null;
 };
 
 function euro(v?: number | null) {
@@ -191,6 +192,87 @@ function buildLabelSetXml(p: PamProduct) {
 </LabelSet>`;
 }
 
+/**
+ * Code39 patterns (n = narrow, w = wide) for supported characters
+ * Bars and spaces alternate, pattern starts with a bar element
+ */
+const CODE39: Record<string, string> = {
+  '0': 'nnnwwnwnn', '1': 'wnnwnnnnw', '2': 'nnwwnnnnw', '3': 'wnwwnnnnn',
+  '4': 'nnnwwnnnw', '5': 'wnnwwnnnn', '6': 'nnwwwnnnn', '7': 'nnnwnnwnw',
+  '8': 'wnnwnnwnn', '9': 'nnwwnnwnn', 'A': 'wnnnnwnnw', 'B': 'nnwnnwnnw',
+  'C': 'wnwnnwnnn', 'D': 'nnnnwwnnw', 'E': 'wnnnwwnnn', 'F': 'nnwnwwnnn',
+  'G': 'nnnnnwwnw', 'H': 'wnnnnwwnn', 'I': 'nnwnnwwnn', 'J': 'nnnnwwwnn',
+  'K': 'wnnnnnnww', 'L': 'nnwnnnnww', 'M': 'wnwnnnnwn', 'N': 'nnnnwnnww',
+  'O': 'wnnnwnnwn', 'P': 'nnwnwnnwn', 'Q': 'nnnnnnwww', 'R': 'wnnnnnwwn',
+  'S': 'nnwnnnwwn', 'T': 'nnnnwnwwn', 'U': 'wwnnnnnnw', 'V': 'nwwnnnnnw',
+  'W': 'wwwnnnnnn', 'X': 'nwnnwnnnw', 'Y': 'wwnnwnnnn', 'Z': 'nwwnwnnnn',
+  '-': 'nwnnnnwnw', '.': 'wwnnnnwnn', ' ': 'nwwnnnwnn', '$': 'nwnwnwnnn',
+  '/': 'nwnwnnnwn', '+': 'nwnnnwnwn', '%': 'nnnwnwnwn', '*': 'nwnnwnwnn' // start/stop
+};
+function toCode39Text(v: string) {
+  const cleaned = v.toUpperCase().replace(/[^0-9A-Z.\- /+$%]/g, '');
+  return `*${cleaned}*`;
+}
+function drawCode39(doc: jsPDF, x: number, y: number, w: number, h: number, value: string) {
+  const text = toCode39Text(value);
+  const narrow = 1; // unit
+  const wide = 3;   // unit
+  // compute total units
+  let units = 0;
+  for (let i = 0; i < text.length; i++) {
+    const pat = CODE39[text[i]] || CODE39['-'];
+    for (let j = 0; j < pat.length; j++) units += (pat[j] === 'w' ? wide : narrow);
+    if (i !== text.length - 1) units += narrow; // inter-char space
+  }
+  const unitW = w / units;
+  let cx = x;
+  for (let i = 0; i < text.length; i++) {
+    const pat = CODE39[text[i]] || CODE39['-'];
+    for (let j = 0; j < pat.length; j++) {
+      const isBar = (j % 2 === 0);
+      const ww = (pat[j] === 'w' ? wide : narrow) * unitW;
+      if (isBar) {
+        doc.rect(cx, y, ww, h, 'F');
+      }
+      cx += ww;
+    }
+    if (i !== text.length - 1) cx += narrow * unitW; // inter-char space
+  }
+}
+/** Very small deterministic matrix as placeholder (not a true QR) */
+function drawPseudoMatrix(doc: jsPDF, x: number, y: number, size: number, seed: string) {
+  const grid = 21;
+  const cell = size / grid;
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < seed.length; i++) h = (h ^ seed.charCodeAt(i)) * 16777619 >>> 0;
+  for (let r = 0; r < grid; r++) {
+    for (let c = 0; c < grid; c++) {
+      const bit = ((h >> ((r * 3 + c) % 31)) ^ ((r + c) & 1)) & 1;
+      if (bit) {
+        doc.rect(x + c * cell, y + r * cell, cell * 0.95, cell * 0.95, 'F');
+      }
+    }
+  }
+}
+function wrapUpper(doc: jsPDF, text: string, x: number, y: number, maxWidth: number, lineH: number, maxLines: number) {
+  const words = (text || '').toUpperCase().split(/\s+/);
+  let line = '';
+  let lines: string[] = [];
+  for (const w of words) {
+    const test = line ? `${line} ${w}` : w;
+    if (doc.getTextWidth(test) <= maxWidth) {
+      line = test;
+    } else {
+      if (line) lines.push(line);
+      line = w;
+      if (lines.length >= maxLines - 1) break;
+    }
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  lines.forEach((ln, i) => doc.text(ln, x, y + i * lineH, { align: 'center', maxWidth }));
+  return y + (lines.length * lineH);
+}
+
 export default function LabelPrintButton({ product }: { product: PamProduct }) {
   const [busy, setBusy] = useState(false);
 
@@ -283,89 +365,86 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
 
     setBusy(true);
     try {
-      // Page étiquette 62×100 mm (DYMO) en mm
-      const doc = new jsPDF({ unit: 'mm', format: [62, 100], orientation: 'portrait' });
+      // Étiquette 57×32 mm
+      const doc = new jsPDF({ unit: 'mm', format: [57, 32], orientation: 'portrait' });
 
-      // Données
-      const sku = (((product as any)?.sku) || product.id || '').toString().toUpperCase();
-      const name = (product.name || '').toString();
-      const qty = 1;
-      const unit = Number((product.retail_price ?? product.pro_price) || 0);
-      const total = unit * qty;
+      // Paramètres de mise en page
+      const margin = 2.2;
+      const innerW = 57 - margin * 2;
 
-      // Bordure/encadré
+      // Encadré arrondi léger
       doc.setDrawColor(0);
-      doc.setLineWidth(0.4);
-      doc.rect(3, 3, 56, 94);
+      doc.setLineWidth(0.3);
+      doc.roundedRect(margin, margin, innerW, 32 - margin * 2, 1.2, 1.2);
 
-      // En-têtes
+      // Code-barres sur toute la largeur utile (barre remplie noire)
+      const barcodeX = margin + 2;
+      const barcodeW = innerW - 4;
+      const barcodeH = 6;
+      doc.setFillColor(0, 0, 0);
+      drawCode39(doc, barcodeX, margin + 1.2, barcodeW, barcodeH, serial);
+
+      // Ligne numéro + type TVA juste en dessous, centré
+      const vatLabel = (product.vat_type === 'margin') ? 'TVM' : 'TTC';
       doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10);
-      doc.text('Étiquette produit', 31, 9, { align: 'center' });
+      doc.setFontSize(7.5);
+      doc.text(`${serial} • ${vatLabel}`, margin + innerW / 2, margin + 1.2 + barcodeH + 3.2, { align: 'center' });
 
-      // Bloc infos texte
+      // QR en haut-gauche
+      const qrSize = 12.5;
+      const qrX = margin + 1.2;
+      const qrY = margin + 1.2 + barcodeH + 5;
+      doc.setFillColor(0, 0, 0);
+      drawPseudoMatrix(doc, qrX, qrY, qrSize, `/?page=mobile-actions&id=${product.id}`);
+
+      // PV / PVP sous le QR (petit)
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8);
-      const lineX = 6;
-      let y = 16;
+      doc.setFontSize(6.5);
+      const pv = euro(product.retail_price ?? null);
+      const pvp = euro(product.pro_price ?? null);
+      const pvY = qrY + qrSize + 2.2;
+      doc.text(`PV: ${pv}`, qrX, pvY);
+      doc.text(`PVP: ${pvp}`, qrX, pvY + 3.2);
 
-      doc.text(`SKU: ${sku || '—'}`, lineX, y); y += 5;
-      doc.text(`Nom: ${name.slice(0, 40)}`, lineX, y); y += 5;
-      doc.text(`N° série: ${serial}`, lineX, y); y += 5;
-      doc.text(`Qté: ${qty}`, lineX, y); y += 5;
-      doc.text(`PU: ${euro(unit)}`, lineX, y); y += 5;
+      // Bloc central (à droite du QR) — nom produit (MAJ), puis BAT si dispo
+      const textLeft = qrX + qrSize + 2.5;
+      const textWidth = margin + innerW - textLeft - 1.2;
       doc.setFont('helvetica', 'bold');
-      doc.text(`Total: ${euro(total)}`, lineX, y); y += 6;
+      doc.setFontSize(7.5);
+      const startTextY = qrY + 2.4;
+      const afterNameY = wrapUpper(doc, (product.name || ''), margin + innerW / 2, startTextY, textWidth, 3.4, 2);
+      // BAT (facultatif)
+      if (typeof product.battery_level === 'number') {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.5);
+        doc.text(`BAT: ${Math.round(product.battery_level)}%`, margin + innerW / 2, afterNameY + 3.6, { align: 'center' });
+      }
 
-      // “Pseudo” code (grille binaire) à partir du numéro de série (sans dépendance externe)
-      // Ce n'est pas un QR scannable, mais donne un rendu visuel compact.
-      const gridSize = 16;
-      const cell = 2.5; // mm
-      const startX = 6;
-      const startY = 50;
-      // Petit hash déterministe
-      let h = 0;
-      for (let i = 0; i < serial.length; i++) {
-        h = (h * 33 + serial.charCodeAt(i)) >>> 0;
-      }
-      doc.setDrawColor(0);
-      for (let r = 0; r < gridSize; r++) {
-        for (let c = 0; c < gridSize; c++) {
-          // Décider de remplir la case selon un bit du hash “mixé”
-          const bit = ((h >> ((r + c) % 31)) ^ ((r * 17 + c * 13) & 1)) & 1;
-          if (bit) {
-            doc.setFillColor(0, 0, 0);
-            doc.rect(startX + c * cell, startY + r * cell, cell - 0.2, cell - 0.2, 'F');
-          }
-        }
-      }
-      // Légende sous la grille
+      // Filet + notes (petit) en bas
+      const notesTopY = 32 - margin - 8.0;
+      doc.setLineWidth(0.2);
+      doc.line(margin + 1.2, notesTopY, margin + innerW - 1.2, notesTopY);
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(7);
-      doc.text(`SN: ${serial}`, startX, startY + gridSize * cell + 4);
+      doc.setFontSize(6.3);
+      const note = (product.product_note || '').replace(/\r?\n/g, ' ');
+      // Wrap manuel très simple par tranches
+      const maxChars = 50;
+      const n1 = note.slice(0, maxChars);
+      const n2 = note.slice(maxChars, maxChars * 2);
+      if (n1) doc.text(n1, margin + 1.4, notesTopY + 3.2, { maxWidth: innerW - 2.8 });
+      if (n2) doc.text(n2, margin + 1.4, notesTopY + 6.2, { maxWidth: innerW - 2.8 });
 
-      // Ouvrir dans un nouvel onglet et proposer d'imprimer
+      // Ouvrir dans un onglet et proposer impression
       const url = doc.output('bloburl');
       const w = window.open(url, '_blank');
-
       if (w) {
         setTimeout(() => {
           const go = window.confirm('Souhaitez-vous imprimer toutes les étiquettes maintenant ?');
           if (go) {
-            try {
-              w.focus();
-              // Certains navigateurs ne déclenchent l’impression qu’une fois le PDF chargé
-              setTimeout(() => {
-                try { (w as any).print?.(); } catch {}
-              }, 400);
-            } catch {
-              // Fallback téléchargement si impression indisponible
-              doc.save('etiquettes.pdf');
-            }
+            try { w.focus(); setTimeout(() => { try { (w as any).print?.(); } catch {} }, 400); } catch { doc.save('etiquettes.pdf'); }
           }
-        }, 500);
+        }, 300);
       } else {
-        // Popup bloquée → téléchargement direct
         doc.save('etiquettes.pdf');
       }
     } catch (e) {
