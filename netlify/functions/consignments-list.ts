@@ -124,16 +124,16 @@ export const handler = async (event: any) => {
     const userRole = profile?.role || 'MAGASIN';
     console.log('[consignments-list] Rôle utilisateur:', userRole);
 
-    // Contrôle d'accès RBAC
-    if (userRole === 'COMMANDE') {
-      console.log('[consignments-list] Accès refusé pour COMMANDE');
+    // Contrôle d'accès RBAC - Seuls ADMIN_FULL et ADMIN peuvent accéder
+    if (userRole !== 'ADMIN_FULL' && userRole !== 'ADMIN') {
+      console.log('[consignments-list] Accès refusé pour rôle:', userRole);
       return {
         statusCode: 403,
         headers: {
           ...corsHeaders,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ error: 'forbidden', message: 'Accès non autorisé pour ce rôle' })
+        body: JSON.stringify({ error: 'forbidden', message: 'Accès réservé aux administrateurs' })
       };
     }
 
@@ -261,17 +261,116 @@ export const handler = async (event: any) => {
       if (!useFallback && detailResult) {
         console.log('[consignments-list] Détails chargés:', detailResult?.length || 0, 'produits');
 
-        // Masquer les montants si nécessaire
+        // Enrichir avec les infos produit (serial_number, parent_id, parent_name, vat_regime)
+        const productIds = detailResult.map((item: any) => item.product_id).filter(Boolean);
+        console.log('[consignments-list] Enrichissement des produits:', productIds.length);
+
+        // Récupérer les infos produit complètes (incluant pro_price)
+        const { data: productsData, error: productsError } = await supabaseService
+          .from('products')
+          .select('id, serial_number, parent_id, product_type, pro_price, parent:products!parent_id(name)')
+          .in('id', productIds);
+
+        if (productsError) {
+          console.error('[consignments-list] Erreur récupération produits:', productsError);
+        }
+
+        const productsMap = new Map<string, any>();
+        (productsData || []).forEach((p: any) => {
+          const parentName = Array.isArray(p.parent) ? p.parent[0]?.name : p.parent?.name;
+          productsMap.set(p.id, {
+            serial_number: p.serial_number,
+            parent_id: p.parent_id,
+            parent_name: parentName,
+            product_type: p.product_type,
+            pro_price: p.pro_price
+          });
+        });
+
+        // Récupérer les derniers mouvements pour chaque produit pour obtenir unit_price_ht et vat_regime
+        const consignmentIds = detailResult.map((item: any) => item.consignment_id).filter(Boolean);
+        const { data: movesData, error: movesError } = await supabaseService
+          .from('consignment_moves')
+          .select('consignment_id, unit_price_ht, vat_rate, vat_regime, type, created_at')
+          .in('consignment_id', consignmentIds)
+          .order('created_at', { ascending: false });
+
+        if (movesError) {
+          console.error('[consignments-list] Erreur récupération moves:', movesError);
+        }
+
+        // Construire une map des derniers mouvements par consignment_id
+        const movesMap = new Map<string, any>();
+        (movesData || []).forEach((m: any) => {
+          if (!movesMap.has(m.consignment_id)) {
+            movesMap.set(m.consignment_id, m);
+          }
+        });
+
+        console.log('[consignments-list] Mouvements récupérés:', movesMap.size);
+
+        // Masquer les montants si nécessaire et enrichir avec les nouvelles données
         detailData = (detailResult || []).map((item: any) => {
+          const productInfo = productsMap.get(item.product_id) || {};
+          const moveInfo = movesMap.get(item.consignment_id) || {};
+
+          // Calculer le prix unitaire selon le régime de TVA
+          const unitPriceHT = Number(moveInfo.unit_price_ht || 0);
+          const vatRate = Number(moveInfo.vat_rate || 0);
+          const vatRegime = String(moveInfo.vat_regime || '').toUpperCase();
+
+          let unitPrice = 0;
+          if (vatRegime === 'MARGE') {
+            // Prix TTC pour TVA marge
+            unitPrice = unitPriceHT + (unitPriceHT * vatRate);
+          } else {
+            // Prix HT pour TVA normale
+            unitPrice = unitPriceHT;
+          }
+
+          // Calculer le prix total de la ligne
+          const qtyDepot = Number(item.qty_en_depot || 0);
+          const totalLinePrice = unitPrice * qtyDepot;
+
+          console.log('[consignments-list] Article:', {
+            sku: item.product_sku,
+            serial: productInfo.serial_number,
+            parent: productInfo.parent_name,
+            pro_price: productInfo.pro_price,
+            vatRegime,
+            unitPriceHT,
+            unitPrice,
+            qty: qtyDepot,
+            totalLine: totalLinePrice
+          });
+
           if (!canViewVAT) {
             return {
               ...item,
+              serial_number: productInfo.serial_number || null,
+              parent_id: productInfo.parent_id || null,
+              parent_name: productInfo.parent_name || null,
+              product_type: productInfo.product_type || null,
+              pro_price: null,
+              vat_regime: null,
+              unit_price: null,
+              total_line_price: null,
               montant_ht: null,
               tva_normal: null,
               tva_marge: null
             };
           }
-          return item;
+          return {
+            ...item,
+            serial_number: productInfo.serial_number || null,
+            parent_id: productInfo.parent_id || null,
+            parent_name: productInfo.parent_name || null,
+            product_type: productInfo.product_type || null,
+            pro_price: Number(productInfo.pro_price || 0),
+            vat_regime: vatRegime || null,
+            unit_price: unitPrice,
+            total_line_price: totalLinePrice
+          };
         });
       } else {
         // Fallback: reconstruire les lignes depuis consignments + consignment_moves
@@ -282,7 +381,7 @@ export const handler = async (event: any) => {
             id,
             stock_id,
             product_id,
-            product:products(name,sku),
+            product:products(name,sku,serial_number,parent_id,product_type,pro_price,parent:products!parent_id(name)),
             moves:consignment_moves(qty,type,unit_price_ht,vat_rate,vat_regime,created_at)
           `)
           .eq('stock_id', stockId);
@@ -298,6 +397,11 @@ export const handler = async (event: any) => {
             const prod = Array.isArray(c.product) ? c.product[0] : c.product;
             const productName = prod?.name ?? null;
             const productSku = prod?.sku ?? null;
+            const serialNumber = prod?.serial_number ?? null;
+            const parentId = prod?.parent_id ?? null;
+            const parentName = Array.isArray(prod?.parent) ? prod.parent[0]?.name : prod?.parent?.name ?? null;
+            const productType = prod?.product_type ?? null;
+            const proPrice = prod?.pro_price ?? null;
             const moves = Array.isArray(c.moves) ? c.moves : [];
 
             let qtyDepot = 0;
@@ -306,6 +410,9 @@ export const handler = async (event: any) => {
             let tvaNormale = 0;
             let tvaMarge = 0;
             let lastMoveAt: string | null = null;
+            let lastUnitPriceHT = 0;
+            let lastVatRate = 0;
+            let lastVatRegime = '';
 
             for (const m of moves) {
               const q = Number(m.qty || 0);
@@ -331,8 +438,37 @@ export const handler = async (event: any) => {
               }
 
               const ts = m.created_at ? new Date(m.created_at).toISOString() : null;
-              if (ts && (!lastMoveAt || ts > lastMoveAt)) lastMoveAt = ts;
+              if (ts && (!lastMoveAt || ts > lastMoveAt)) {
+                lastMoveAt = ts;
+                lastUnitPriceHT = up;
+                lastVatRate = vatRate;
+                lastVatRegime = regime;
+              }
             }
+
+            // Calculer le prix unitaire selon le régime de TVA
+            let unitPrice = 0;
+            if (lastVatRegime === 'MARGE') {
+              // Prix TTC pour TVA marge
+              unitPrice = lastUnitPriceHT + (lastUnitPriceHT * lastVatRate);
+            } else {
+              // Prix HT pour TVA normale
+              unitPrice = lastUnitPriceHT;
+            }
+
+            const totalLinePrice = unitPrice * qtyDepot;
+
+            console.log('[consignments-list] Fallback - Article:', {
+              sku: productSku,
+              serial: serialNumber,
+              parent: parentName,
+              pro_price: proPrice,
+              vatRegime: lastVatRegime,
+              unitPriceHT: lastUnitPriceHT,
+              unitPrice,
+              qty: qtyDepot,
+              totalLine: totalLinePrice
+            });
 
             const row = {
               consignment_id: c.id,
@@ -340,6 +476,14 @@ export const handler = async (event: any) => {
               product_id: pid,
               product_name: productName,
               product_sku: productSku,
+              serial_number: serialNumber,
+              parent_id: parentId,
+              parent_name: parentName,
+              product_type: productType,
+              pro_price: proPrice,
+              vat_regime: lastVatRegime,
+              unit_price: unitPrice,
+              total_line_price: totalLinePrice,
               qty_en_depot: qtyDepot,
               qty_facture_non_payee: qtyFactureNP,
               montant_ht: montantHT,
@@ -364,6 +508,10 @@ export const handler = async (event: any) => {
             if (!canViewVAT) {
               return {
                 ...item,
+                pro_price: null,
+                vat_regime: null,
+                unit_price: null,
+                total_line_price: null,
                 montant_ht: null,
                 tva_normal: null,
                 tva_marge: null
