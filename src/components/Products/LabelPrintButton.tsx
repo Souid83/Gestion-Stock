@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { jsPDF } from 'jspdf';
 import { supabase } from '../../lib/supabase';
-import * as QRCode from 'qrcode';
 
 type PamProduct = {
   id: string;
@@ -158,7 +157,8 @@ export default function LabelPrintButton({ product }: { product: PamProduct }) {
       // QR (vrai QR avec deeplink gestock://product/{serial})
       const qrSize = 10.5, qrX = m + 1.2, qrY = m + 1.1;
       const deeplink = `gestock://product/${serial}`;
-      const qrDataUrl = await QRCode.toDataURL(deeplink, { errorCorrectionLevel: 'M', margin: 0, scale: 8 });
+      const { toDataURL } = await import('qrcode');
+      const qrDataUrl = await toDataURL(deeplink, { errorCorrectionLevel: 'M', margin: 0, scale: 8 });
       doc.addImage(qrDataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
 
       // BARCODE — top row, full width to the right of QR, half height
